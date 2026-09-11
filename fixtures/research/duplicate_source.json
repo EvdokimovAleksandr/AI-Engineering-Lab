@@ -1,0 +1,21 @@
+{
+  "query": "duplicate source query a",
+  "hits": [
+    {
+      "uri": "https://nist.gov/publications/silk-standard",
+      "title": "NIST silk notes",
+      "publisher": "NIST"
+    },
+    {
+      "uri": "https://nist.gov/publications/silk-standard",
+      "title": "NIST silk notes (duplicate hit)",
+      "publisher": "NIST"
+    }
+  ],
+  "sources": [
+    {
+      "uri": "https://nist.gov/publications/silk-standard",
+      "content": "Official measurement notes on silk fiber tensile fixtures and humidity control. Paragraph two explains gauge length."
+    }
+  ]
+}

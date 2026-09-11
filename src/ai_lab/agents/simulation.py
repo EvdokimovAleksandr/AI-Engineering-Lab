@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from ai_lab.agents.base import AgentContext, BaseAgent, llm_json
 from ai_lab.core.enums import AgentRole, EvidenceKind
 from ai_lab.core.models import AgentResult, Claim, ComputationArtifact, ConfidenceBreakdown, TaskSpec
-from ai_lab.memory.run_store import hash_code
 from ai_lab.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -39,35 +36,28 @@ class SimulationAgent(BaseAgent):
             logger.error("Simulation agent returned empty code")
             raise ValueError("Simulation agent must return non-empty code")
 
-        started = datetime.now(timezone.utc)
         try:
             exec_result = await ctx.tools.call(
                 "python.execute",
                 allowed=allowed,
                 code=code,
+                task_id=task.task_id,
             )
         except Exception as exc:
             logger.error("Simulation python.execute failed: %s", exc)
             raise
-        finished = datetime.now(timezone.utc)
 
-        artifact = ComputationArtifact(
-            run_id=ctx.run_id,
-            kind="simulation",
-            input_hash=hash_code(task.objective),
-            code_hash=hash_code(code),
-            started_at=started,
-            finished_at=finished,
-            status="ok" if exec_result.get("returncode") == 0 else "error",
-            code=code,
-            stdout=str(exec_result.get("stdout") or ""),
-            stderr=str(exec_result.get("stderr") or ""),
-            returncode=exec_result.get("returncode"),
-            result={"trust_level": exec_result.get("trust_level")},
-            metadata={"objective": task.objective},
-        )
+        if not exec_result.get("artifact"):
+            logger.error("python.execute returned no ComputationArtifact")
+            raise RuntimeError("python.execute must return a ComputationArtifact")
+        artifact = ComputationArtifact.model_validate(exec_result["artifact"])
+        artifact.kind = "simulation"
+        artifact.metadata = {**artifact.metadata, "objective": task.objective}
         paths: list[str] = []
-        if ctx.run_store is not None:
+        if exec_result.get("artifact_saved"):
+            if ctx.run_store is not None:
+                paths.append(ctx.run_store.rel("computations", f"{artifact.artifact_id}.json"))
+        elif ctx.run_store is not None:
             paths.append(ctx.run_store.save_computation(artifact))
         # Convenience pointer (non-authoritative); immutable history lives in run store
         await ctx.tools.call(

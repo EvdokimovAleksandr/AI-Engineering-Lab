@@ -63,8 +63,8 @@ Demotion preserves history (`status=DEMOTED`).
 
 ### Evidence graph
 
-Nodes: PROJECT, RUN, SOURCE, CLAIM, …, CONFLICT, ADJUDICATION, …  
-Edges: SUPPORTS, CONTRADICTS, TESTS, VERIFIED_BY, SUPERSEDES, PART_OF, CREATED_IN, …  
+Nodes: PROJECT, RUN, SOURCE, EVIDENCE, CLAIM, …, CONFLICT, ADJUDICATION, …  
+Edges: SUPPORTS, CONTRADICTS, TESTS, VERIFIED_BY, SUPERSEDES, PART_OF, CREATED_IN, CITES, DERIVED_FROM, …  
 
 Integrity: no dangling edges, no unknown types, no cross-project links except `SAME_AS`, no bidirectional `SUPERSEDES`, no cycles on acyclic edge types, VERIFICATION↔CLAIM for TESTS/VERIFIED_BY.
 
@@ -90,8 +90,24 @@ JSON files + indexes (swappable later via `KnowledgeRepository` / `EvidenceRepos
 
 ### ResearchProvider
 
-Interface only (`search` / `fetch` / `resolve_source`). Mock remains STUB-tier.
+Pipeline (not a stub-only interface): `search` / `fetch` / `resolve_source` / `research`.
+
+`research()` returns `ResearchResult` (query, sources, evidence, findings, metadata).
+Search backends are a separate `SearchProvider` (`mock`, `replay`, `web`).
+`mock://` remains `STUB`. Provenance: Claim → Evidence (`SUPPORTS`) → Source (`DERIVED_FROM`) + Claim `CITES` Source.
+
+Details: [research-pipeline.md](research-pipeline.md).
+
+### Computation artifacts
+
+`ComputationArtifact` (V2.4b/V2.4c/V2.5) carries `code_hash` / `input_hash` / `environment_hash` / `computation_hash` (Docker adds `image_digest`; in-process solvers set `sandbox_backend=in_process`). Graph types stay `CALCULATION` / `SIMULATION` / `ASSUMPTION` — no `PHYSICS_RESULT` node. See [compute-sandbox.md](compute-sandbox.md), [docker-sandbox.md](docker-sandbox.md), [engineering-simulation.md](engineering-simulation.md).
+
+### Engineering verification (V2.2)
+
+Quantitative claims carry `verification_spec` (or legacy `math_check`). `DeterministicVerifier` uses Pint + an AST interpreter. Results are `GraphNodeType.CHECK` nodes (`TESTS` / `VERIFIED_BY` → CLAIM). See [engineering-verification.md](engineering-verification.md).
 
 ### Record/replay
 
 `fixtures/llm/{role}/*.json` + `ReplayProvider` for deterministic tests.
+
+V2.4a: replay fixtures may include routing metadata (`model`, `routing_policy_version`, `routed_model`). Same routing + same fixture → same response, no network. LLM invocation provenance lives under `.runs/<run_id>/llm/invocations.jsonl` (existing RunStore, not a second log). Different model ids are **not** `INDEPENDENT_EVIDENCE`. See [multi-model-routing.md](multi-model-routing.md).

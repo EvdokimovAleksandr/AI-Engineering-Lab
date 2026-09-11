@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,17 +12,37 @@ from ai_lab.agents import build_agents
 from ai_lab.agents.base import AgentContext
 from ai_lab.checks import run_deterministic_checks
 from ai_lab.config_loader import load_config
-from ai_lab.core.enums import AdjudicationStatus, AgentRole, GraphEdgeType, GraphNodeType, ProjectState
+from ai_lab.core.enums import (
+    AdjudicationStatus,
+    AgentRole,
+    AgreementType,
+    GraphEdgeType,
+    GraphNodeType,
+    ProjectState,
+    TaskKind,
+    TaskStatus,
+)
 from ai_lab.core.models import (
     AgentResult,
     HitlRequest,
     LabConfig,
     ProjectSnapshot,
     RunEvent,
+    TaskExecutionRecord,
+    TaskGraph,
     TaskSpec,
     VerificationReport,
 )
-from ai_lab.llm.registry import create_llm_provider
+from ai_lab.llm.registry import create_llm_router
+from ai_lab.llm.config import (
+    KNOWN_PROVIDER_IDS,
+    apply_provider_override,
+    independence_policy_from_config,
+    routing_policy_from_config,
+)
+from ai_lab.llm.independence import ArchitectureFlags
+from ai_lab.llm.policy import validate_routing_policy
+from ai_lab.llm.router import RoutingContext
 from ai_lab.knowledge import KnowledgeService
 from ai_lab.knowledge.graph import JsonEvidenceRepository
 from ai_lab.core.models import GraphEdge
@@ -36,6 +57,14 @@ from ai_lab.orchestrator.adjudication import adjudicate
 from ai_lab.orchestrator.budget import BudgetExceeded, budget_from_config, check_budget
 from ai_lab.orchestrator.hitl import HitlGate
 from ai_lab.orchestrator.iteration_policy import next_iteration_state
+from ai_lab.planner.context import ProblemContext
+from ai_lab.planner.dag import ready_task_ids
+from ai_lab.planner.factory import create_planner
+from ai_lab.planner.hashing import task_graph_hash
+from ai_lab.planner.iteration import graph_for_iteration
+from ai_lab.planner.pipeline import plan_and_validate
+from ai_lab.planner.schemas import KNOWN_TOOL_NAMES, REVIEW_ROLES
+from ai_lab.planner.validator import TaskGraphValidationContext, validate_task_graph
 from ai_lab.tools.factory import build_tool_registry
 from ai_lab.workflows.engine import WorkflowEngine
 from ai_lab.workflows.example_pipeline import STAGE_ROLES
@@ -55,11 +84,14 @@ class LabRuntime:
         hitl: HitlGate | None = None,
         force_verification_fail: bool = False,
         resume_run_id: str | None = None,
+        problem_override: str | None = None,
     ) -> None:
         self.project = project
         self.config = config
         self.repo_root = repo_root
         self.hitl = hitl or HitlGate(auto_approve=False)
+        # UI/CLI problem text is UNTRUSTED_DATA — stored on the run, never as trusted config.
+        self.problem_override = problem_override
         # Resume only when explicitly requested — never auto-continue terminal/failed runs
         self._is_resume = resume_run_id is not None
         if resume_run_id:
@@ -69,25 +101,63 @@ class LabRuntime:
         events_dir = repo_root / str(config.observability.get("run_events_dir", ".runs"))
         self.sink = RunEventSink(events_dir / f"{self.run_id}.jsonl")
         self.budget = budget_from_config(config)
-        self.llm = create_llm_provider(
-            config,
-            cwd=None,  # never bind Cursor to project root
-            force_verification_fail=force_verification_fail,
+        self.routing_policy = routing_policy_from_config(config)
+        self.independence_policy = independence_policy_from_config(config)
+        routing_result = validate_routing_policy(
+            self.routing_policy,
+            KNOWN_PROVIDER_IDS,
+            independence_policy=self.independence_policy,
+            architecture=ArchitectureFlags(
+                review_contexts_differ=True,
+                frozen_blind_bundle=True,
+                parallel_review=bool(config.runtime.get("parallel_independent_groups", True)),
+            ),
         )
-        self.tools = build_tool_registry(
-            project, config, run_id=self.run_id, sink=self.sink, budget=self.budget
-        )
+        if not routing_result.ok:
+            logger.error("Routing policy invalid: %s", routing_result.errors)
+            raise RuntimeError(f"Invalid routing policy: {routing_result.errors}")
+        self._independence_assessment = routing_result.assessment
         self.knowledge = KnowledgeService(project, run_id=self.run_id)
         self.evidence = EvidenceStore(project, run_id=self.run_id)
         self.decisions = DecisionLog(project.root / "decisions" / "decision_log.jsonl")
         self.graph = self.knowledge.graph  # JsonEvidenceRepository
         self.run_store = RunStore(project, self.run_id)
+        self.llm = create_llm_router(
+            config,
+            cwd=None,  # never bind Cursor to project root
+            force_verification_fail=force_verification_fail,
+            routing_context=RoutingContext(
+                run_id=self.run_id,
+                sink=self.sink,
+                run_store=self.run_store,
+                frozen_blind_bundle=True,
+                parallel_review=bool(config.runtime.get("parallel_independent_groups", True)),
+                review_contexts_differ=True,
+            ),
+            skip_policy_validation=True,
+        )
+        self.tools = build_tool_registry(
+            project,
+            config,
+            run_id=self.run_id,
+            sink=self.sink,
+            budget=self.budget,
+            knowledge=self.knowledge,
+            repo_root=repo_root,
+            run_store=self.run_store,
+        )
         self.agents = build_agents()
         self.project.ensure_layout()
         self._last_verification: VerificationReport | None = None
         self._last_red_team = None
         self._last_adjudication = None
         self._last_check_report = None
+        self._last_simulation_spec = None
+        self._last_simulation_result = None
+        self._task_graph: TaskGraph | None = None
+        self._task_statuses: dict[str, TaskStatus] = {}
+        self._executions: list[TaskExecutionRecord] = []
+        self._task_graph_node_id: str | None = None
 
     def _ctx(self) -> AgentContext:
         return AgentContext(
@@ -107,10 +177,185 @@ class LabRuntime:
                 "adjudication": self._last_adjudication,
                 "verification_report": self._last_verification,
                 "red_team_report": self._last_red_team,
+                "independence_assessment": self._independence_assessment,
             },
         )
 
+    def _problem_context(self) -> ProblemContext:
+        def _read(name: str) -> str:
+            try:
+                return self.project.read_text(name)
+            except FileNotFoundError:
+                return ""
+
+        problem_text = self.problem_override if self.problem_override is not None else _read("problem.md")
+        extra = {}
+        if self.problem_override is not None:
+            extra["ui_problem.md"] = self.problem_override
+        return ProblemContext(
+            project_id=self.project.name,
+            run_id=self.run_id,
+            problem_text=problem_text,
+            requirements_text=_read("requirements.md"),
+            assumptions_text=_read("assumptions.md"),
+            budget=self.budget,
+            allowed_tools=tuple(sorted(KNOWN_TOOL_NAMES)),
+            extra_data=extra,
+        )
+
+    def _save_planner_state(self, *, proposal, graph: TaskGraph | None, validation) -> None:
+        if proposal is not None:
+            dump = proposal.model_dump(mode="json") if hasattr(proposal, "model_dump") else proposal
+            self.run_store.save_planner_json("proposal.json", dump)
+        if graph is not None:
+            payload = graph.model_dump(mode="json")
+            self.run_store.save_planner_json("task_graph.json", payload)
+            self.run_store.save_planner_json(f"task_graph_v{graph.version}.json", payload)
+        self.run_store.save_planner_json("validation.json", validation.model_dump(mode="json"))
+        self._write_executions()
+
+    def _write_executions(self) -> None:
+        self.run_store.save_planner_json(
+            "executions.json",
+            [e.model_dump(mode="json") for e in self._executions],
+        )
+
+    def _record_task_graph_provenance(self, graph: TaskGraph, graph_hash: str) -> None:
+        """RUN ← PART_OF ← TASK_GRAPH so decisions can be traced to the plan."""
+        run_node = self.graph.ensure_node(
+            node_type=GraphNodeType.RUN,
+            ref_id=self.run_id,
+            run_id=self.run_id,
+            label=self.run_id,
+            payload={"task_graph_hash": graph_hash, "task_graph_id": graph.graph_id},
+        )
+        tg_node = self.graph.ensure_node(
+            node_type=GraphNodeType.TASK_GRAPH,
+            ref_id=f"{graph.graph_id}@v{graph.version}",
+            run_id=self.run_id,
+            label=graph.graph_id,
+            created_by="planner",
+            payload={
+                "hash": graph_hash,
+                "version": graph.version,
+                "task_ids": [t.task_id for t in graph.tasks],
+            },
+        )
+        self._task_graph_node_id = tg_node.node_id
+        self.graph.ensure_edge(
+            edge_type=GraphEdgeType.PART_OF,
+            source_id=tg_node.node_id,
+            target_id=run_node.node_id,
+            run_id=self.run_id,
+        )
+
+    def _record_task_outputs(self, task: TaskSpec, result: AgentResult) -> None:
+        if self._task_graph_node_id is None:
+            return
+        for claim in result.claims:
+            c_node = self.graph.ensure_node(
+                node_type=GraphNodeType.CLAIM,
+                ref_id=claim.claim_id,
+                run_id=self.run_id,
+                label=claim.claim_id,
+                created_by=task.task_id,
+                metadata={"task_id": task.task_id},
+            )
+            self.graph.ensure_edge(
+                edge_type=GraphEdgeType.DERIVED_FROM,
+                source_id=c_node.node_id,
+                target_id=self._task_graph_node_id,
+                run_id=self.run_id,
+            )
+        for decision in result.decisions:
+            d_node = self.graph.ensure_node(
+                node_type=GraphNodeType.DECISION,
+                ref_id=decision.decision_id,
+                run_id=self.run_id,
+                label=decision.decision_id,
+                created_by=task.task_id,
+                metadata={"task_id": task.task_id},
+            )
+            self.graph.ensure_edge(
+                edge_type=GraphEdgeType.DERIVED_FROM,
+                source_id=d_node.node_id,
+                target_id=self._task_graph_node_id,
+                run_id=self.run_id,
+            )
+
+    async def _prepare_task_graph(self) -> TaskGraph:
+        """Planner proposes; only a validated DAG is stored and later executed."""
+        planner = create_planner(self.config, llm=self.llm)
+        context = self._problem_context()
+        vctx = TaskGraphValidationContext(
+            budget=self.budget,
+            routing_policy=self.routing_policy,
+            independence_policy=self.independence_policy,
+            available_providers=KNOWN_PROVIDER_IDS,
+        )
+        proposal, graph, validation = await plan_and_validate(
+            planner, context, validation_context=vctx
+        )
+        self._save_planner_state(proposal=proposal, graph=graph, validation=validation)
+        if not validation.ok or graph is None:
+            logger.error(
+                "TaskGraph rejected: %s %s",
+                validation.reason.value,
+                validation.errors,
+            )
+            raise RuntimeError(
+                f"TaskGraph invalid: {validation.reason.value}: {validation.errors}"
+            )
+
+        hitl_plan = bool(self.config.runtime.get("hitl_on_plan", False))
+        if hitl_plan or (proposal is not None and proposal.requires_human_approval):
+            req = HitlRequest(
+                reason="TaskGraph requires human approval before execution",
+                options=["approve_plan", "reject_plan"],
+                context={"graph_id": graph.graph_id, "hash": validation.graph_hash},
+            )
+            decision = self.hitl.request(req)
+            if (not decision.approved) or decision.choice == "reject_plan":
+                raise _HitlInterrupt(req)
+
+        graph_hash = validation.graph_hash or task_graph_hash(graph)
+        self._task_graph = graph
+        self._task_statuses = {t.task_id: TaskStatus.PENDING for t in graph.tasks}
+        self.run_store.attach_task_graph(
+            graph_id=graph.graph_id,
+            graph_hash=graph_hash,
+            version=graph.version,
+        )
+        self._record_task_graph_provenance(graph, graph_hash)
+        return graph
+
+    def _install_graph(self, graph: TaskGraph) -> None:
+        validation = validate_task_graph(
+            graph,
+            TaskGraphValidationContext(
+                budget=self.budget,
+                routing_policy=self.routing_policy,
+                independence_policy=self.independence_policy,
+                available_providers=KNOWN_PROVIDER_IDS,
+            ),
+        )
+        self._save_planner_state(proposal=None, graph=graph, validation=validation)
+        if not validation.ok:
+            raise RuntimeError(
+                f"Revised TaskGraph invalid: {validation.reason.value}: {validation.errors}"
+            )
+        graph_hash = validation.graph_hash or task_graph_hash(graph)
+        self._task_graph = graph
+        self._task_statuses = {t.task_id: TaskStatus.PENDING for t in graph.tasks}
+        self.run_store.attach_task_graph(
+            graph_id=graph.graph_id,
+            graph_hash=graph_hash,
+            version=graph.version,
+        )
+        self._record_task_graph_provenance(graph, graph_hash)
+
     def _tasks_for_state(self, state: ProjectState) -> list[TaskSpec]:
+        """Compatibility helper: stage table is NOT the execution DAG."""
         roles = STAGE_ROLES.get(state, [])
         tasks: list[TaskSpec] = []
         objective_base = f"Stage {state.value} for project {self.project.name}"
@@ -136,6 +381,10 @@ class LabRuntime:
         if agent is None:
             raise KeyError(f"No agent registered for role {task.role}")
         ctx = self._ctx()
+        ctx.extra["task_id"] = task.task_id
+        ctx.extra["independence_group"] = task.independence_group
+        ctx.extra["frozen_blind_bundle"] = task.role in REVIEW_ROLES
+        ctx.extra["parallel_review"] = task.role in REVIEW_ROLES
         t0 = time.perf_counter()
         self.sink.emit(
             RunEvent(
@@ -192,11 +441,354 @@ class LabRuntime:
             results.append(await self._run_task(t))
         return results
 
-    async def _run_independent_review(self) -> AdjudicationStatus:
-        """Deterministic checks → frozen ReviewBundle → V ∥ RT → adjudication.
+    async def _execute_graph_task(self, task: TaskSpec, engine: WorkflowEngine) -> None:
+        """Run one validated node. System kinds never go through the LLM agent map."""
+        self._task_statuses[task.task_id] = TaskStatus.RUNNING
+        if task.state_context is not None:
+            engine.set_state(task.state_context)
+        started = datetime.now(timezone.utc)
+        artifact_paths: list[str] = []
+        claim_ids: list[str] = []
+        pending_reentry: AdjudicationStatus | None = None
+        try:
+            if task.task_kind == TaskKind.MODEL_BUILD:
+                paths, claims = await self._run_model_build(task)
+                artifact_paths = paths
+                claim_ids = claims
+            elif task.task_kind == TaskKind.SIMULATION:
+                paths, claims = await self._run_engineering_simulation(task)
+                artifact_paths = paths
+                claim_ids = claims
+            elif task.task_kind == TaskKind.SIMULATION_VERIFICATION:
+                artifact_paths = await self._run_simulation_verification(task)
+            elif task.task_kind == TaskKind.DETERMINISTIC_CHECK:
+                await self._run_deterministic_review_prep()
+                artifact_paths = ["reviews/review_bundle.json"]
+            elif task.task_kind == TaskKind.ADJUDICATION:
+                adj_status = self._finish_adjudication()
+                engine.snapshot.adjudication_status = adj_status
+                artifact_paths = ["reviews/last_adjudication.json"]
+                pending_reentry = adj_status
+            else:
+                if task.role is None:
+                    raise RuntimeError(f"AGENT task {task.task_id} missing role")
+                exec_task = task
+                if task.role in REVIEW_ROLES:
+                    exec_task = task.model_copy(
+                        update={"review_bundle_path": "reviews/review_bundle.json"}
+                    )
+                result = await self._run_task(exec_task)
+                self._record_task_outputs(task, result)
+                artifact_paths = list(result.artifact_paths)
+                claim_ids = [c.claim_id for c in result.claims]
+                if task.role == AgentRole.VERIFICATION:
+                    self._last_verification = result.verification
+                if task.role == AgentRole.RED_TEAM:
+                    self._last_red_team = result.red_team
+            self._task_statuses[task.task_id] = TaskStatus.SUCCESS
+            self._executions.append(
+                TaskExecutionRecord(
+                    task_id=task.task_id,
+                    status=TaskStatus.SUCCESS,
+                    role=task.role.value if task.role else None,
+                    task_kind=task.task_kind,
+                    artifact_paths=artifact_paths,
+                    claim_ids=claim_ids,
+                    started_at=started,
+                    finished_at=datetime.now(timezone.utc),
+                )
+            )
+            if pending_reentry is not None and pending_reentry != AdjudicationStatus.PASS:
+                await self._after_adjudication(engine, pending_reentry)
+        except _HitlInterrupt:
+            self._task_statuses[task.task_id] = TaskStatus.HITL_REQUIRED
+            self._executions.append(
+                TaskExecutionRecord(
+                    task_id=task.task_id,
+                    status=TaskStatus.HITL_REQUIRED,
+                    role=task.role.value if task.role else None,
+                    task_kind=task.task_kind,
+                    started_at=started,
+                    finished_at=datetime.now(timezone.utc),
+                    error="HITL_REQUIRED",
+                )
+            )
+            raise
+        except Exception as exc:
+            self._task_statuses[task.task_id] = TaskStatus.FAILED
+            self._executions.append(
+                TaskExecutionRecord(
+                    task_id=task.task_id,
+                    status=TaskStatus.FAILED,
+                    role=task.role.value if task.role else None,
+                    task_kind=task.task_kind,
+                    started_at=started,
+                    finished_at=datetime.now(timezone.utc),
+                    error=str(exc),
+                )
+            )
+            logger.error("Task %s failed: %s", task.task_id, exc)
+            raise
 
-        Uses CURRENT_RUN claims only — no stale leakage from prior runs.
-        """
+    async def _execute_graph_step(self, engine: WorkflowEngine) -> bool:
+        """Execute the current ready wave. Returns False when nothing is eligible."""
+        graph = self._task_graph
+        if graph is None:
+            raise RuntimeError("No validated TaskGraph loaded")
+        ready = ready_task_ids(graph.tasks, self._task_statuses)
+        if not ready:
+            return False
+        by_id = {t.task_id: t for t in graph.tasks}
+        ready_tasks = [by_id[tid] for tid in ready]
+        v_ready = [t for t in ready_tasks if t.role == AgentRole.VERIFICATION]
+        rt_ready = [t for t in ready_tasks if t.role == AgentRole.RED_TEAM]
+        others = [
+            t
+            for t in ready_tasks
+            if t.role not in REVIEW_ROLES
+        ]
+        parallel = bool(self.config.runtime.get("parallel_independent_groups", True))
+        if others:
+            if parallel and len(others) > 1:
+                await asyncio.gather(*[self._execute_graph_task(t, engine) for t in others])
+            else:
+                for t in others:
+                    await self._execute_graph_task(t, engine)
+        if v_ready and rt_ready:
+            await asyncio.gather(
+                self._execute_graph_task(v_ready[0], engine),
+                self._execute_graph_task(rt_ready[0], engine),
+            )
+            if self._last_red_team is not None and self._last_verification is not None:
+                dumped = str(self._last_red_team.model_dump(mode="json"))
+                if self._last_verification.report_id in dumped:
+                    logger.error("Red team output appears to reference verification report id")
+                    raise RuntimeError("Review isolation violated: red team saw verification id")
+        elif v_ready:
+            await self._execute_graph_task(v_ready[0], engine)
+        elif rt_ready:
+            await self._execute_graph_task(rt_ready[0], engine)
+        self._write_executions()
+        return True
+
+    async def _after_adjudication(
+        self, engine: WorkflowEngine, adj_status: AdjudicationStatus
+    ) -> None:
+        """Verdict handling. TaskStatus stays SUCCESS; IterationPolicy is unchanged."""
+        if adj_status == AdjudicationStatus.PASS:
+            return
+        graph = self._task_graph
+        if graph is None:
+            return
+        for task in graph.tasks:
+            if (
+                task.state_context == ProjectState.SYNTHESIS
+                and self._task_statuses.get(task.task_id) == TaskStatus.PENDING
+            ):
+                self._task_statuses[task.task_id] = TaskStatus.SKIPPED
+        engine.snapshot.iteration += 1
+        if adj_status == AdjudicationStatus.DISPUTED and self.config.runtime.get(
+            "hitl_on_disputed", True
+        ):
+            if self._last_red_team and (
+                self._last_red_team.recommended_reject
+                or (
+                    self._last_red_team.max_severity
+                    and self._last_red_team.max_severity.value in {"HIGH", "CRITICAL"}
+                )
+            ):
+                decision = self.hitl.request(
+                    HitlRequest(
+                        reason="Adjudication DISPUTED with critical red-team findings",
+                        options=["iterate", "accept_risk_and_synthesize", "abort"],
+                        context={"adjudication": adj_status.value},
+                    )
+                )
+                if decision.approved and decision.choice == "accept_risk_and_synthesize":
+                    for task in graph.tasks:
+                        if task.state_context == ProjectState.SYNTHESIS:
+                            self._task_statuses[task.task_id] = TaskStatus.PENDING
+                    return
+                if decision.approved and decision.choice == "iterate":
+                    nxt = next_iteration_state(
+                        adjudication=self._last_adjudication,
+                        verification=self._last_verification,
+                        check_report=self._last_check_report,
+                    )
+                    self._reenter_graph(nxt, reason=f"hitl_iterate:{adj_status.value}")
+                    return
+                raise _HitlInterrupt(
+                    HitlRequest(
+                        reason="critical red team",
+                        options=["iterate", "accept_risk_and_synthesize", "abort"],
+                        context={"adjudication": adj_status.value},
+                    )
+                )
+        nxt = next_iteration_state(
+            adjudication=self._last_adjudication,
+            verification=self._last_verification,
+            check_report=self._last_check_report,
+        )
+        self._reenter_graph(nxt, reason=f"adjudication:{adj_status.value}")
+
+    def _reenter_graph(self, nxt: ProjectState, *, reason: str) -> None:
+        """Extension point: IterationPolicy target becomes TaskGraph vN."""
+        if self._task_graph is None:
+            raise RuntimeError("Cannot revise TaskGraph: none loaded")
+        revised = graph_for_iteration(self._task_graph, nxt, reason=reason)
+        self._install_graph(revised)
+
+    def _finalize_graph(self, engine: WorkflowEngine) -> None:
+        graph = self._task_graph
+        if graph is None:
+            return
+        synthesis = [t for t in graph.tasks if t.state_context == ProjectState.SYNTHESIS]
+        if synthesis and all(
+            self._task_statuses.get(t.task_id) == TaskStatus.SUCCESS for t in synthesis
+        ):
+            engine.set_state(ProjectState.COMPLETED)
+            return
+        if any(s == TaskStatus.HITL_REQUIRED for s in self._task_statuses.values()):
+            engine.set_state(ProjectState.AWAITING_HUMAN)
+            return
+        if engine.snapshot.adjudication_status == AdjudicationStatus.DISPUTED:
+            engine.set_state(ProjectState.DISPUTED)
+            return
+        if engine.snapshot.adjudication_status and engine.snapshot.adjudication_status != AdjudicationStatus.PASS:
+            if engine.state not in {
+                ProjectState.AWAITING_HUMAN,
+                ProjectState.BUDGET_EXCEEDED,
+            }:
+                engine.set_state(ProjectState.ITERATION_REQUIRED)
+
+    async def _run_model_build(self, task: TaskSpec) -> tuple[list[str], list[str]]:
+        """Load a trusted SimulationSpec and validate it. No solver, no LLM."""
+        from ai_lab.simulation.load import load_trusted_spec
+        from ai_lab.simulation.validate import validate_simulation_spec
+
+        spec_id = str((task.metadata or {}).get("spec_id") or "uniaxial_tension")
+        spec = load_trusted_spec(spec_id, repo_root=self.repo_root)
+        validation = validate_simulation_spec(spec)
+        if not validation.ok:
+            logger.error("MODEL_BUILD rejected spec %s: %s", spec_id, validation.errors)
+            raise RuntimeError(f"SimulationSpec invalid: {validation.errors}")
+        self._last_simulation_spec = spec
+        rel = self.run_store.rel("artifacts", "simulation_spec.json")
+        self.project.write_json(rel, spec.model_dump(mode="json"))
+        self.project.write_json("simulations/last_spec.json", spec.model_dump(mode="json"))
+        for assumption in spec.assumptions:
+            node = self.graph.ensure_node(
+                node_type=GraphNodeType.ASSUMPTION,
+                ref_id=assumption.id,
+                run_id=self.run_id,
+                label=assumption.id,
+                created_by="model_build",
+                payload=assumption.model_dump(mode="json"),
+            )
+            if self._task_graph_node_id:
+                self.graph.ensure_edge(
+                    edge_type=GraphEdgeType.PART_OF,
+                    source_id=node.node_id,
+                    target_id=self._task_graph_node_id,
+                    run_id=self.run_id,
+                )
+        return [rel, "simulations/last_spec.json"], []
+
+    async def _run_engineering_simulation(self, task: TaskSpec) -> tuple[list[str], list[str]]:
+        """Deterministic solver. Does not go through SimulationAgent."""
+        from ai_lab.simulation.claims import claims_from_simulation, verification_specs_from_simulation
+        from ai_lab.simulation.load import load_trusted_spec
+        from ai_lab.simulation.pipeline import run_simulation
+        from ai_lab.simulation.protocol import SolverContext
+
+        spec = self._last_simulation_spec
+        if spec is None:
+            spec_id = str((task.metadata or {}).get("spec_id") or "uniaxial_tension")
+            spec = load_trusted_spec(spec_id, repo_root=self.repo_root)
+            self._last_simulation_spec = spec
+        result = run_simulation(
+            spec,
+            SolverContext(run_id=self.run_id, task_id=task.task_id, repo_root=self.repo_root),
+            run_store=self.run_store,
+        )
+        self._last_simulation_result = result
+        rel = self.run_store.rel("artifacts", "simulation_result.json")
+        self.project.write_json(rel, result.model_dump(mode="json"))
+        self.project.write_json("simulations/last_result.json", result.model_dump(mode="json"))
+        vspecs = verification_specs_from_simulation(spec, result)
+        claims = claims_from_simulation(spec, result, verification_specs=vspecs)
+        claim_ids: list[str] = []
+        sim_node = self.graph.ensure_node(
+            node_type=GraphNodeType.SIMULATION,
+            ref_id=result.result_id,
+            run_id=self.run_id,
+            label=result.solver,
+            created_by="engineering_solver",
+            payload={
+                "status": result.status.value,
+                "scientific_status": result.scientific_status.model_dump(mode="json"),
+                "computation_artifact_id": result.computation_artifact_id,
+            },
+        )
+        calc_node = self.graph.ensure_node(
+            node_type=GraphNodeType.CALCULATION,
+            ref_id=f"calc-{result.result_id}",
+            run_id=self.run_id,
+            label="uniaxial_tension",
+            created_by="engineering_solver",
+            payload={"outputs": {k: v.model_dump(mode="json") for k, v in result.outputs.items()}},
+        )
+        self.graph.ensure_edge(
+            edge_type=GraphEdgeType.DERIVED_FROM,
+            source_id=sim_node.node_id,
+            target_id=calc_node.node_id,
+            run_id=self.run_id,
+        )
+        if self._task_graph_node_id:
+            self.graph.ensure_edge(
+                edge_type=GraphEdgeType.DERIVED_FROM,
+                source_id=sim_node.node_id,
+                target_id=self._task_graph_node_id,
+                run_id=self.run_id,
+            )
+        for claim in claims:
+            self.evidence.save_claim(claim, subdirectory="calculations")
+            claim_ids.append(claim.claim_id)
+            c_node = self.graph.ensure_node(
+                node_type=GraphNodeType.CLAIM,
+                ref_id=claim.claim_id,
+                run_id=self.run_id,
+                label=claim.claim_id,
+                created_by="engineering_solver",
+            )
+            self.graph.ensure_edge(
+                edge_type=GraphEdgeType.DERIVED_FROM,
+                source_id=c_node.node_id,
+                target_id=sim_node.node_id,
+                run_id=self.run_id,
+            )
+        return [rel, "simulations/last_result.json"], claim_ids
+
+    async def _run_simulation_verification(self, task: TaskSpec) -> list[str]:
+        """Layer 2: DeterministicVerifier on simulation outputs. Not a scientific PASS."""
+        from ai_lab.checks.verifier import DeterministicVerifier, limits_from_config
+        from ai_lab.simulation.claims import verification_specs_from_simulation
+
+        spec = self._last_simulation_spec
+        result = self._last_simulation_result
+        if spec is None or result is None:
+            raise RuntimeError("simulation_verification requires a prior simulation task")
+        engine = DeterministicVerifier(limits_from_config(self.config.verification))
+        reports = []
+        for vspec in verification_specs_from_simulation(spec, result):
+            vr = engine.verify(vspec)
+            reports.append(vr.model_dump(mode="json"))
+        rel = self.run_store.rel("artifacts", "simulation_verification.json")
+        self.project.write_json(rel, {"task_id": task.task_id, "results": reports})
+        return [rel]
+
+    async def _run_deterministic_review_prep(self) -> None:
+        """Freeze ReviewBundle + deterministic checks. No LLM."""
         claims = self.evidence.list_claims(include_superseded=False)
         comps = [a.model_dump(mode="json") for a in self.run_store.list_computations()]
 
@@ -210,9 +802,12 @@ class LabRuntime:
         from ai_lab.memory.review_bundle import claim_to_blind_view
 
         blind = [claim_to_blind_view(c) for c in claims]
-        check_report = await run_deterministic_checks(blind, execute_code=_exec)
+        check_report = await run_deterministic_checks(
+            blind,
+            execute_code=_exec,
+            verification_cfg=self.config.verification,
+        )
         self._last_check_report = check_report
-
         bundle = build_review_bundle(
             run_id=self.run_id,
             claims=claims,
@@ -222,45 +817,31 @@ class LabRuntime:
         bundle_path = "reviews/review_bundle.json"
         self.project.write_json(bundle_path, bundle.model_dump(mode="json"))
         self.run_store.save_review_json("review_bundle.json", bundle.model_dump(mode="json"))
+        self._record_check_nodes(claims, check_report)
 
-        v_task = TaskSpec(
-            role=AgentRole.VERIFICATION,
-            objective="Independent verification of ReviewBundle",
-            state_context=ProjectState.VERIFICATION,
-            independence_group="independent_review",
-            review_bundle_path=bundle_path,
-        )
-        rt_task = TaskSpec(
-            role=AgentRole.RED_TEAM,
-            objective="Independent red-team attack on ReviewBundle",
-            state_context=ProjectState.VERIFICATION,
-            independence_group="independent_review",
-            review_bundle_path=bundle_path,
-        )
-        # Parallel — neither sees the other's report (only shared frozen bundle)
-        v_result, rt_result = await asyncio.gather(self._run_task(v_task), self._run_task(rt_task))
-        self._last_verification = v_result.verification
-        self._last_red_team = rt_result.red_team
-
-        # Ensure isolation artifact: red team raw must not contain verification report id
-        if rt_result.raw and self._last_verification:
-            dumped = str(rt_result.raw)
-            if self._last_verification.report_id in dumped:
-                logger.error("Red team output appears to reference verification report id")
-                raise RuntimeError("Review isolation violated: red team saw verification id")
-
+    def _finish_adjudication(self) -> AdjudicationStatus:
+        if self._last_check_report is None:
+            raise RuntimeError("Adjudication requires a deterministic check report")
         adj = adjudicate(
-            check_report=check_report,
+            check_report=self._last_check_report,
             verification=self._last_verification,
             red_team=self._last_red_team,
         )
+        adj.routing_policy_version = self.routing_policy.version
+        adj.model_routing = {
+            "verification": self.routing_policy.for_role(AgentRole.VERIFICATION).public_dump(),
+            "red_team": self.routing_policy.for_role(AgentRole.RED_TEAM).public_dump(),
+        }
+        if self.routing_policy.adjudication is not None:
+            adj.model_routing["adjudication"] = self.routing_policy.adjudication.public_dump()
+        if self._independence_assessment is not None:
+            adj.independence_level = self._independence_assessment.level
         self._last_adjudication = adj
         self.project.write_json(
             "reviews/last_adjudication.json", adj.model_dump(mode="json")
         )
         self.run_store.save_review_json("last_adjudication.json", adj.model_dump(mode="json"))
-
-        # Evidence graph links (CURRENT_RUN claims only)
+        claims = self.evidence.list_claims(include_superseded=False)
         if self._last_verification and claims:
             v_node = self.graph.ensure_node(
                 node_type=GraphNodeType.VERIFICATION,
@@ -285,6 +866,79 @@ class LabRuntime:
                 )
             )
         return adj.status
+
+    async def _run_independent_review(self) -> AdjudicationStatus:
+        """Deterministic checks → frozen ReviewBundle → V ∥ RT → adjudication.
+
+        Uses CURRENT_RUN claims only — no stale leakage from prior runs.
+        Kept as a single entry for tests; the TaskGraph executor calls the parts.
+        """
+        await self._run_deterministic_review_prep()
+        bundle_path = "reviews/review_bundle.json"
+        v_task = TaskSpec(
+            role=AgentRole.VERIFICATION,
+            objective="Independent verification of ReviewBundle",
+            state_context=ProjectState.VERIFICATION,
+            independence_group="independent_review",
+            review_bundle_path=bundle_path,
+        )
+        rt_task = TaskSpec(
+            role=AgentRole.RED_TEAM,
+            objective="Independent red-team attack on ReviewBundle",
+            state_context=ProjectState.VERIFICATION,
+            independence_group="independent_review",
+            review_bundle_path=bundle_path,
+        )
+        v_result, rt_result = await asyncio.gather(self._run_task(v_task), self._run_task(rt_task))
+        self._last_verification = v_result.verification
+        self._last_red_team = rt_result.red_team
+        if rt_result.raw and self._last_verification:
+            dumped = str(rt_result.raw)
+            if self._last_verification.report_id in dumped:
+                logger.error("Red team output appears to reference verification report id")
+                raise RuntimeError("Review isolation violated: red team saw verification id")
+        return self._finish_adjudication()
+
+    def _record_check_nodes(self, claims, check_report) -> None:
+        """Persist Claim → CHECK (VerificationResult) with TESTS / VERIFIED_BY.
+
+        Reuses GraphNodeType.CHECK — no second knowledge store.
+        """
+        claims_by_id = {c.claim_id: c for c in claims}
+        for vr in check_report.verification_results:
+            self.run_store.save_review_json(
+                f"checks/{vr.result_id}.json", vr.model_dump(mode="json")
+            )
+            check_node = self.graph.ensure_node(
+                node_type=GraphNodeType.CHECK,
+                ref_id=vr.result_id,
+                run_id=self.run_id,
+                label=f"check:{vr.status.value}",
+                created_by="deterministic_verifier",
+                independence=AgreementType.INDEPENDENT_EVIDENCE,
+                payload=vr.model_dump(mode="json"),
+            )
+            claim_id = vr.claim_id
+            if not claim_id or claim_id not in claims_by_id:
+                continue
+            c_node = self.graph.ensure_node(
+                node_type=GraphNodeType.CLAIM,
+                ref_id=claim_id,
+                run_id=self.run_id,
+                label=claim_id,
+            )
+            self.graph.ensure_edge(
+                edge_type=GraphEdgeType.TESTS,
+                source_id=check_node.node_id,
+                target_id=c_node.node_id,
+                run_id=self.run_id,
+            )
+            self.graph.ensure_edge(
+                edge_type=GraphEdgeType.VERIFIED_BY,
+                source_id=c_node.node_id,
+                target_id=check_node.node_id,
+                run_id=self.run_id,
+            )
 
     async def run(self) -> ProjectSnapshot:
         snapshot = self.project.load_snapshot()
@@ -316,6 +970,12 @@ class LabRuntime:
             budget=self.budget,
             model_id=next(iter(self.config.models.values()), "unknown"),
         )
+        if self.problem_override is not None:
+            # Run-scoped copy only — does not overwrite project/problem.md.
+            self.project.write_text(
+                self.run_store.rel("inputs", "ui_problem.md"),
+                self.problem_override,
+            )
 
         engine = WorkflowEngine(
             snapshot,
@@ -325,90 +985,31 @@ class LabRuntime:
         steps = 0
 
         try:
+            if engine.state != ProjectState.AWAITING_HUMAN:
+                try:
+                    await self._prepare_task_graph()
+                except _HitlInterrupt as hitl_exc:
+                    engine.snapshot.pending_hitl = hitl_exc.request.model_dump(mode="json")
+                    engine.set_state(ProjectState.AWAITING_HUMAN)
+                    self.project.save_snapshot(engine.snapshot)
+                    self.run_store.finish_manifest(final_state=engine.snapshot.state.value)
+                    return engine.snapshot
+
             while not engine.is_terminal() and steps < max_iter:
                 steps += 1
                 check_budget(self.budget)
-                state = engine.state
-                logger.info("Run %s state=%s step=%s", self.run_id, state.value, steps)
+                logger.info("Run %s state=%s step=%s", self.run_id, engine.state.value, steps)
 
-                if state == ProjectState.CREATED:
+                if engine.state == ProjectState.CREATED:
                     engine.advance()
                     self.project.save_snapshot(engine.snapshot)
                     continue
 
-                # Resume HITL if pending
-                if state == ProjectState.AWAITING_HUMAN:
-                    break
-
-                if state == ProjectState.VERIFICATION:
-                    try:
-                        adj_status = await self._run_independent_review()
-                    except _HitlInterrupt as hitl_exc:
-                        engine.snapshot.pending_hitl = hitl_exc.request.model_dump(mode="json")
-                        engine.set_state(ProjectState.AWAITING_HUMAN)
-                        self.project.save_snapshot(engine.snapshot)
-                        break
-
-                    engine.snapshot.adjudication_status = adj_status
-                    if adj_status == AdjudicationStatus.PASS:
-                        engine.set_state(ProjectState.SYNTHESIS)
-                    else:
-                        engine.snapshot.iteration += 1
-                        # Critical red-team / disputed may need human
-                        if adj_status == AdjudicationStatus.DISPUTED and self.config.runtime.get(
-                            "hitl_on_disputed", True
-                        ):
-                            if self._last_red_team and (
-                                self._last_red_team.recommended_reject
-                                or (
-                                    self._last_red_team.max_severity
-                                    and self._last_red_team.max_severity.value
-                                    in {"HIGH", "CRITICAL"}
-                                )
-                            ):
-                                decision = self.hitl.request(
-                                    HitlRequest(
-                                        reason="Adjudication DISPUTED with critical red-team findings",
-                                        options=["iterate", "accept_risk_and_synthesize", "abort"],
-                                        context={"adjudication": adj_status.value},
-                                    )
-                                )
-                                if decision.approved and decision.choice == "accept_risk_and_synthesize":
-                                    engine.set_state(ProjectState.SYNTHESIS)
-                                elif decision.approved and decision.choice == "iterate":
-                                    nxt = next_iteration_state(
-                                        adjudication=self._last_adjudication,
-                                        verification=self._last_verification,
-                                        check_report=self._last_check_report,
-                                    )
-                                    engine.set_state(nxt)
-                                else:
-                                    engine.set_state(ProjectState.AWAITING_HUMAN)
-                                    engine.snapshot.pending_hitl = {
-                                        "reason": "critical red team",
-                                        "adjudication": adj_status.value,
-                                    }
-                                self.project.save_snapshot(engine.snapshot)
-                                continue
-
-                        nxt = next_iteration_state(
-                            adjudication=self._last_adjudication,
-                            verification=self._last_verification,
-                            check_report=self._last_check_report,
-                        )
-                        engine.set_state(nxt)
-                    self.project.save_snapshot(engine.snapshot)
-                    continue
-
-                tasks = self._tasks_for_state(state)
-                if not tasks:
-                    logger.error("No stage roles for state %s — awaiting human", state.value)
-                    engine.set_state(ProjectState.AWAITING_HUMAN)
-                    self.project.save_snapshot(engine.snapshot)
+                if engine.state == ProjectState.AWAITING_HUMAN:
                     break
 
                 try:
-                    await self._run_tasks(tasks)
+                    progressed = await self._execute_graph_step(engine)
                 except _HitlInterrupt as hitl_exc:
                     engine.snapshot.pending_hitl = hitl_exc.request.model_dump(mode="json")
                     engine.set_state(ProjectState.AWAITING_HUMAN)
@@ -420,25 +1021,10 @@ class LabRuntime:
                     self.project.save_snapshot(engine.snapshot)
                     break
 
-                if state == ProjectState.ITERATION_REQUIRED:
-                    engine.set_state(ProjectState.VERIFICATION)
-                elif state == ProjectState.SYNTHESIS:
-                    engine.set_state(ProjectState.COMPLETED)
-                elif state in {
-                    ProjectState.CALCULATION,
-                    ProjectState.SIMULATION,
-                    ProjectState.ANALYSIS,
-                    ProjectState.RESEARCH,
-                    ProjectState.HYPOTHESIS,
-                } and engine.snapshot.iteration > 0:
-                    # After iteration re-entry stages, go back to independent review
-                    # once we complete the targeted stage (advance within iteration path)
-                    if state in {ProjectState.CALCULATION, ProjectState.SIMULATION}:
-                        engine.set_state(ProjectState.VERIFICATION)
-                    else:
-                        engine.advance()
-                else:
-                    engine.advance()
+                if not progressed:
+                    self._finalize_graph(engine)
+                    self.project.save_snapshot(engine.snapshot)
+                    break
 
                 self.project.save_snapshot(engine.snapshot)
 
@@ -480,11 +1066,12 @@ async def run_project(
     config_path: Path | None = None,
     auto_approve_hitl: bool = False,
     resume: bool = False,
+    problem_override: str | None = None,
 ) -> ProjectSnapshot:
     root = repo_root_from_here()
     config = load_config(config_path or (root / "config" / "default.yaml"))
     if provider:
-        config.provider = provider
+        config = apply_provider_override(config, provider)
     projects_dir = projects_dir or (root / "projects")
     store = ProjectStore.open(projects_dir, project_name)
     snap = store.load_snapshot()
@@ -495,5 +1082,41 @@ async def run_project(
         repo_root=root,
         hitl=HitlGate(auto_approve=auto_approve_hitl),
         resume_run_id=resume_id,
+        problem_override=problem_override,
     )
     return await runtime.run()
+
+
+async def plan_project(
+    project_name: str,
+    *,
+    provider: str | None = None,
+    projects_dir: Path | None = None,
+    config_path: Path | None = None,
+    auto_approve_hitl: bool = False,
+) -> tuple[TaskGraph, object]:
+    """Create and validate a TaskGraph without executing research/compute."""
+    root = repo_root_from_here()
+    config = load_config(config_path or (root / "config" / "default.yaml"))
+    if provider:
+        config = apply_provider_override(config, provider)
+    projects_dir = projects_dir or (root / "projects")
+    store = ProjectStore.open(projects_dir, project_name)
+    runtime = LabRuntime(
+        store,
+        config,
+        repo_root=root,
+        hitl=HitlGate(auto_approve=auto_approve_hitl),
+    )
+    runtime.run_store.build_manifest(
+        config=config,
+        repo_root=root,
+        budget=runtime.budget,
+        model_id=next(iter(config.models.values()), "unknown"),
+    )
+    graph = await runtime._prepare_task_graph()
+    runtime.run_store.finish_manifest(final_state="PLANNED")
+    validation = runtime.project.read_json(
+        runtime.run_store.rel("planner", "validation.json")
+    )
+    return graph, validation

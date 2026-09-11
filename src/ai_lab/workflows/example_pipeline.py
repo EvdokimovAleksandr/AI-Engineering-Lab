@@ -1,7 +1,9 @@
 """Example stage → default agent roles mapping for MVP pipeline.
 
 NOTE: This is a stage→roles table, NOT a dependency graph.
-Independent Verification ∥ Red Team is orchestrated inside LabRuntime at VERIFICATION.
+LabRuntime executes a validated TaskGraph (see planner/). StaticPlanner
+compiles this table into data. Independent Verification ∥ Red Team remain
+siblings under independence_group=independent_review.
 """
 
 from __future__ import annotations

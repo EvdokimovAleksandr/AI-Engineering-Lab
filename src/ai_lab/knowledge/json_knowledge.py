@@ -98,7 +98,11 @@ class JsonKnowledgeRepository:
             )
         if not claim.content_hash:
             claim.content_hash = claim_content_hash(
-                claim.statement, claim.kind.value, claim.evidence, claim.math_check
+                claim.statement,
+                claim.kind.value,
+                claim.evidence,
+                claim.math_check,
+                claim.verification_spec,
             )
 
         filename = f"{claim.claim_id}_v{claim.version}.json"

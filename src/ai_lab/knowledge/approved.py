@@ -115,7 +115,11 @@ def promote_to_approved_knowledge(
         raise PermissionError("Promotion denied: " + "; ".join(gate.reasons))
 
     content_hash = claim.content_hash or claim_content_hash(
-        claim.statement, claim.kind.value, claim.evidence, claim.math_check
+        claim.statement,
+        claim.kind.value,
+        claim.evidence,
+        claim.math_check,
+        claim.verification_spec,
     )
     entry = ApprovedKnowledgeEntry(
         project_id=claim.project_id or store.name,

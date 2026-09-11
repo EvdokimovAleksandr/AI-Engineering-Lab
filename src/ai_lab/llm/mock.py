@@ -34,6 +34,19 @@ class MockProvider:
         self._verification_calls = 0  # metrics only — NEVER drives PASS
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
+        if request.response_schema_name == "TaskGraphProposal":
+            payload = self._planner_proposal()
+            content = json.dumps(payload, ensure_ascii=False)
+            parsed = extract_json_object(content)
+            model = request.model or "mock-deterministic"
+            return LLMResponse(
+                content=content,
+                parsed=parsed,
+                model=model,
+                provider=self.name,
+                run_id="mock_planner",
+                usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            )
         role_raw = request.metadata.get("agent_role", AgentRole.CHIEF_ENGINEER.value)
         try:
             role = AgentRole(role_raw)
@@ -45,10 +58,12 @@ class MockProvider:
         content = json.dumps(payload, ensure_ascii=False)
         parsed = extract_json_object(content)
         usage = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+        # Echo the routed model id so independence tests can distinguish A/B/C.
+        model = request.model or "mock-deterministic"
         return LLMResponse(
             content=content,
             parsed=parsed,
-            model="mock-deterministic",
+            model=model,
             provider=self.name,
             run_id=f"mock_{role.value}",
             usage=usage,
@@ -217,4 +232,15 @@ class MockProvider:
         return {
             "summary": f"Mock noop for role {role.value}",
             "notes": request.messages[-1].content[:200],
+        }
+
+    def _planner_proposal(self) -> dict[str, Any]:
+        """Structured TaskGraphProposal only — never executes tools or agents."""
+        from ai_lab.planner.static import StaticPlanner, tasks_to_proposal_dicts, default_pipeline_tasks
+
+        return {
+            "graph_id": "static_pipeline",
+            "version": 1,
+            "tasks": tasks_to_proposal_dicts(default_pipeline_tasks()),
+            "metadata": {"planner": StaticPlanner.name, "source": "mock"},
         }

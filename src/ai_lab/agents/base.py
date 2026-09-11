@@ -58,6 +58,8 @@ async def llm_json(
         record_agent_call(ctx.budget)
 
     metadata: dict[str, Any] = {"agent_role": role.value, "run_id": ctx.run_id}
+    if ctx.extra.get("task_id"):
+        metadata["task_id"] = ctx.extra["task_id"]
     if extra_metadata:
         metadata.update(extra_metadata)
     request = LLMRequest(
@@ -69,7 +71,23 @@ async def llm_json(
         response_schema_name=schema_name,
         metadata=metadata,
     )
-    response = await ctx.llm.complete(request)
+    if getattr(ctx.llm, "is_llm_router", False):
+        from ai_lab.llm.router import RoutingContext
+
+        routing_ctx = RoutingContext(
+            run_id=ctx.run_id,
+            task_id=ctx.extra.get("task_id"),
+            independence_group=ctx.extra.get("independence_group"),
+            frozen_blind_bundle=bool(ctx.extra.get("frozen_blind_bundle")),
+            parallel_review=bool(ctx.extra.get("parallel_review")),
+            review_contexts_differ=True,
+            sink=ctx.sink,
+            run_store=ctx.run_store,
+        )
+        response = await ctx.llm.complete(request, role=role, context=routing_ctx)
+    else:
+        response = await ctx.llm.complete(request)
+    ctx.extra["last_llm_routing"] = getattr(response, "routing", None) or {}
     if ctx.budget is not None and response.usage:
         tokens = int(response.usage.get("total_tokens") or 0)
         ctx.budget.tokens_used += tokens

@@ -1,0 +1,27 @@
+{
+  "query": "spider silk spinning",
+  "hits": [
+    {
+      "uri": "https://example.edu/silk-fiber-spinning",
+      "title": "Industrial spinning of recombinant spider silk",
+      "publisher": "Example University",
+      "snippet": "Fiber spinning, not expression titer, is the usual bottleneck."
+    },
+    {
+      "uri": "https://en.wikipedia.org/wiki/Spider_silk",
+      "title": "Spider silk",
+      "publisher": "Wikipedia",
+      "snippet": "Encyclopedia overview of spider silk."
+    }
+  ],
+  "sources": [
+    {
+      "uri": "https://example.edu/silk-fiber-spinning",
+      "content": "Industrial spinning of recombinant spider silk\n\nFiber spinning, not expression titer, is the usual bottleneck in scale-up. Drawing stress depends on diameter and take-up speed under controlled humidity."
+    },
+    {
+      "uri": "https://en.wikipedia.org/wiki/Spider_silk",
+      "content": "<html><title>Spider silk</title><body><p>Spider silk is a protein fiber produced by spiders. Tensile strength is often reported near 1-2 GPa in laboratory literature.</p></body></html>"
+    }
+  ]
+}

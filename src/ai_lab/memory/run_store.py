@@ -66,7 +66,7 @@ class RunStore:
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
-        for sub in ("", "computations", "reviews", "decisions", "inputs", "artifacts"):
+        for sub in ("", "computations", "reviews", "decisions", "inputs", "artifacts", "planner", "llm", "sandbox"):
             path = self.project.root / self.rel_root / sub if sub else self.project.root / self.rel_root
             path.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +96,30 @@ class RunStore:
             "red_team": "v2-blind-bundle",
             "simulation": "v2-immutable-artifacts",
         }
+        routing_version = None
+        model_routing: dict[str, dict[str, Any]] = {}
+        independence_dump = None
+        if getattr(config, "routing", None) or getattr(config, "independence", None):
+            from ai_lab.llm.config import (
+                independence_policy_from_config,
+                routing_policy_from_config,
+            )
+
+            policy = routing_policy_from_config(config)
+            routing_version = policy.version
+            model_routing = policy.public_routing_map()
+            independence_dump = independence_policy_from_config(config).model_dump()
+        sandbox_backend = None
+        sandbox_policy_version = None
+        sandbox_caps = None
+        if getattr(config, "sandbox", None) is not None:
+            from ai_lab.sandbox.factory import report_capabilities
+            from ai_lab.sandbox.policy import sandbox_policy_from_config
+
+            sbx_policy = sandbox_policy_from_config(config)
+            sandbox_backend = sbx_policy.backend
+            sandbox_policy_version = sbx_policy.version
+            sandbox_caps = report_capabilities(config).model_dump()
         manifest = RunManifest(
             run_id=self.run_id,
             project_id=self.project.name,
@@ -106,8 +130,9 @@ class RunStore:
             python_version=sys.version.replace("\n", " "),
             dependency_version=_dependency_version(),
             tool_versions={
-                "python.execute": "ast-subprocess-v1",
-                "research.query": "stub-v1",
+                "python.execute": "compute-sandbox-v2.4c",
+                "research.query": "v2.2-pipeline",
+                "deterministic_verifier": "deterministic-verifier-v1",
                 "platform": platform.platform(),
             },
             input_hashes=input_hashes,
@@ -115,6 +140,12 @@ class RunStore:
             configuration_hash=_sha256_text(config_dump),
             budget=budget,
             notes=[],
+            routing_policy_version=routing_version,
+            model_routing=model_routing,
+            independence_policy=independence_dump,
+            sandbox_backend=sandbox_backend,
+            sandbox_policy_version=sandbox_policy_version,
+            sandbox_capabilities=sandbox_caps,
         )
         self.save_manifest(manifest)
         # Copy inputs snapshot (immutable for this run)
@@ -158,6 +189,28 @@ class RunStore:
 
     def save_review_json(self, name: str, data: Any) -> str:
         return self.project.write_json(self.rel("reviews", name), data)
+
+    def save_planner_json(self, name: str, data: Any) -> str:
+        """Planner artifacts live only under this run's directory."""
+        return self.project.write_json(self.rel("planner", name), data)
+
+    def attach_task_graph(self, *, graph_id: str, graph_hash: str, version: int) -> RunManifest:
+        manifest = self.load_manifest()
+        manifest.task_graph_id = graph_id
+        manifest.task_graph_hash = graph_hash
+        manifest.task_graph_version = version
+        self.save_manifest(manifest)
+        return manifest
+
+    def append_llm_invocation(self, payload: dict[str, Any]) -> str:
+        """Append-only LLM provenance under this run (not a second log system)."""
+        rel = self.rel("llm", "invocations.jsonl")
+        full = self.project.root / rel
+        full.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(payload, sort_keys=True, default=str) + "\n"
+        with full.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+        return rel
 
 
 def hash_code(code: str) -> str:

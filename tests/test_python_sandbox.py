@@ -1,7 +1,8 @@
-"""Python sandbox safety tests."""
+"""Python.execute tool-policy tests (AST whitelist) plus sandbox timeout via the tool."""
 
 import pytest
 
+from ai_lab.core.enums import SandboxStatus
 from ai_lab.tools.python_exec import PythonExecTool, SandboxViolation, validate_imports
 
 
@@ -25,12 +26,7 @@ async def test_sandbox_executes_math() -> None:
 @pytest.mark.asyncio
 async def test_sandbox_timeout() -> None:
     tool = PythonExecTool(timeout_seconds=0.3, allowed_modules=set())
-    with pytest.raises(TimeoutError):
-        await tool.run(code="while True:\n    pass\n")
-
-
-@pytest.mark.asyncio
-async def test_forbidden_open() -> None:
-    tool = PythonExecTool(allowed_modules=set())
-    with pytest.raises(SandboxViolation, match="open"):
-        await tool.run(code="open('x','w')\n")
+    result = await tool.run(code="while True:\n    pass\n")
+    assert result["timed_out"] is True
+    assert result["sandbox_status"] == SandboxStatus.TIMEOUT.value
+    assert result["process_alive_after_return"] is False

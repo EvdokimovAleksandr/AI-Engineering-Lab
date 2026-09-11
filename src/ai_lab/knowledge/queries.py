@@ -118,6 +118,50 @@ class EvidenceQueryService:
                     path.extend(self.find_verification_chain(other.ref_id))
         return path
 
+    def find_claim_provenance(self, claim_id: str) -> dict:
+        """Reconstruct Claim → Evidence → Source for a run-scoped claim."""
+        chain: dict = {
+            "claim_id": claim_id,
+            "claim": None,
+            "evidence": [],
+            "sources": [],
+        }
+        try:
+            chain["claim"] = self.knowledge.get_claim(claim_id).model_dump(mode="json")
+        except KeyError:
+            pass
+        for node in self._nodes_by_ref(claim_id):
+            if node.node_type != GraphNodeType.CLAIM:
+                continue
+            for edge, other in self._neighbors(
+                node.node_id,
+                edge_types={GraphEdgeType.CITES},
+                outbound=True,
+            ):
+                if other.node_type == GraphNodeType.SOURCE:
+                    chain["sources"].append(other.model_dump(mode="json"))
+            for edge, other in self._neighbors(
+                node.node_id,
+                edge_types={GraphEdgeType.SUPPORTS},
+                outbound=False,
+            ):
+                if other.node_type == GraphNodeType.EVIDENCE:
+                    ev_dump = other.model_dump(mode="json")
+                    extracted_from = []
+                    for e2, src in self._neighbors(
+                        other.node_id,
+                        edge_types={GraphEdgeType.DERIVED_FROM},
+                        outbound=True,
+                    ):
+                        extracted_from.append(src.model_dump(mode="json"))
+                        if src.node_type == GraphNodeType.SOURCE and src.node_id not in {
+                            s.get("node_id") for s in chain["sources"]
+                        }:
+                            chain["sources"].append(src.model_dump(mode="json"))
+                    ev_dump["extracted_from"] = extracted_from
+                    chain["evidence"].append(ev_dump)
+        return chain
+
     def find_conclusion_dependencies(self, conclusion_id: str) -> list[dict]:
         deps: list[dict] = [{"step": "conclusion", "ref_id": conclusion_id}]
         for node in self._nodes_by_ref(conclusion_id):

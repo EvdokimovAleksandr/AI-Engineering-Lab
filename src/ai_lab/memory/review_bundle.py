@@ -40,6 +40,7 @@ def claim_to_blind_view(claim: Claim) -> BlindClaimView:
         assumptions=list(claim.assumptions or []),
         falsifiers=list(claim.falsifiers or []),
         math_check=dict(claim.math_check) if claim.math_check else None,
+        verification_spec=dict(claim.verification_spec) if claim.verification_spec else None,
         computation_artifact_id=claim.computation_artifact_id,
         refs=list(claim.refs or []),
     )

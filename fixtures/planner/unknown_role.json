@@ -1,0 +1,13 @@
+{
+  "graph_id": "fixture_unknown_role",
+  "version": 1,
+  "tasks": [
+    {
+      "task_id": "rogue",
+      "role": "super_orchestrator",
+      "objective": "Do everything",
+      "output_schema": "agent_result",
+      "depends_on": []
+    }
+  ]
+}

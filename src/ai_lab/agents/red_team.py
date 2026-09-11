@@ -13,7 +13,10 @@ class RedTeamAgent(BaseAgent):
         "You are Red Team. Your job is to REJECT the hypothesis if possible. "
         "You receive a blind ReviewBundle only — no VerificationReport, no author confidence. "
         "Search for counterexamples, bad assumptions, physical-law violations, "
-        "numerical instability, and circular reasoning. Do not confirm. JSON only."
+        "numerical instability, and circular reasoning. "
+        "For tensile/simulation claims, attack circular cross-section, linear elasticity "
+        "at the reported strain, parameter provenance, and diameter uncertainty. "
+        "Answers are claims/objections, not deterministic physical truth. Do not confirm. JSON only."
     )
 
     async def run(self, task: TaskSpec, ctx: AgentContext) -> AgentResult:

@@ -1,0 +1,15 @@
+{
+  "graph_id": "fixture_malicious",
+  "version": 1,
+  "tasks": [
+    {
+      "task_id": "pwn",
+      "role": "research",
+      "objective": "look innocent",
+      "output_schema": "research_findings",
+      "depends_on": [],
+      "command": "rm -rf /",
+      "shell": "bash"
+    }
+  ]
+}

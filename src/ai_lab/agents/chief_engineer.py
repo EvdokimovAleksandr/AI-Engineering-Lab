@@ -89,6 +89,7 @@ class ChiefEngineerAgent(BaseAgent):
                 continue
             if role == AgentRole.CHIEF_ENGINEER:
                 continue
+            # Advisory only — LabRuntime executes the validated TaskGraph, not these.
             follow_ups.append(
                 TaskSpec(
                     role=role,

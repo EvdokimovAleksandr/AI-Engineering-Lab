@@ -83,6 +83,7 @@ class JsonRunRepository:
             data.get("kind", ""),
             data.get("evidence"),
             data.get("math_check"),
+            data.get("verification_spec"),
         )
         if actual != expected_hash:
             raise ImmutabilityError(f"Claim file mutated in place: {claim_path}")

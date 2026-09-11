@@ -15,6 +15,9 @@ verification, and red-team loop — **not** to produce a final industrial proces
 3. What are the fundamental bottlenecks in spinning and post-processing?
 4. Which assumptions about cost, yield, and purity are currently unsupported?
 
+The V2.5 uniaxial tensile **benchmark** uses `fixtures/simulation/uniaxial_tension.json`
+(`fixture://synthetic`, STUB). Those numbers are not measured silk properties.
+
 ## Success criteria for a future lab run
 
 - Explicit claims with sources, conditions, and falsifiers

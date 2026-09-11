@@ -50,6 +50,10 @@ async def test_orchestrator_mock_run(tmp_path: Path) -> None:
     assert (project_dir / "reviews" / "synthesis_bundle.json").exists()
     assert (project_dir / "reviews" / "last_adjudication.json").exists()
     assert (project_dir / ".runs" / snapshot.run_id / "manifest.json").exists()
+    planner = project_dir / ".runs" / snapshot.run_id / "planner"
+    assert (planner / "task_graph.json").exists()
+    assert (planner / "validation.json").exists()
+    assert (planner / "executions.json").exists()
     comps = list((project_dir / ".runs" / snapshot.run_id / "computations").glob("*.json"))
     assert comps, "expected immutable computation artifacts"
     final = (project_dir / "final_report.md").read_text(encoding="utf-8")

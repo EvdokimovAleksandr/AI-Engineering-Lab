@@ -8,7 +8,14 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from ai_lab.core.enums import ConflictStatus, EvidenceStrength, SourceTrustTier, TrustLevel
+from ai_lab.core.enums import (
+    ConflictStatus,
+    EvidenceStrength,
+    SourceKind,
+    SourceTrustTier,
+    TrustLevel,
+)
+from ai_lab.core.models import ResearchFinding
 
 
 def _utc_now() -> datetime:
@@ -103,8 +110,107 @@ class ReplayRecord(BaseModel):
     model: str = "unknown"
     timestamp: datetime = Field(default_factory=_utc_now)
     schema_version: str = "1.0"
+    # V2.4a optional routing snapshot — old fixtures without these fields still load.
+    provider: str = "replay"
+    routing_policy_version: str | None = None
+    routed_model: dict[str, Any] | None = None
 
 
 class PromotionGateResult(BaseModel):
     allowed: bool
     reasons: list[str] = Field(default_factory=list)
+
+
+# --- V2.2 research pipeline (sources / evidence / search hits) ---
+
+
+class EvidenceLocation(BaseModel):
+    """Locator inside a retrieved source. Fields are omitted unless actually known."""
+
+    uri: str | None = None
+    title: str | None = None
+    section: str | None = None
+    paragraph: int | None = None
+    page: str | None = None
+    fragment: str | None = None
+
+
+class SourceRecord(BaseModel):
+    """Resolvable retrieved source with deterministic identity and fingerprint."""
+
+    source_id: str
+    uri: str
+    title: str | None = None
+    publisher: str | None = None
+    retrieved_at: datetime = Field(default_factory=_utc_now)
+    source_type: SourceKind = SourceKind.UNKNOWN
+    trust_tier: SourceTrustTier = SourceTrustTier.SECONDARY
+    content_hash: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    truncated: bool = False
+    # Retrieved body is data, never instructions. May be omitted when serializing to graph.
+    content: str | None = None
+
+
+class EvidenceRecord(BaseModel):
+    """Excerpt extracted from a Source — provenance is mandatory."""
+
+    evidence_id: str
+    source_id: str
+    text: str
+    location: EvidenceLocation = Field(default_factory=EvidenceLocation)
+    retrieved_at: datetime = Field(default_factory=_utc_now)
+    content_hash: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchHit(BaseModel):
+    """Raw search-backend hit before fetch/resolve. URI is required."""
+
+    uri: str
+    title: str | None = None
+    publisher: str | None = None
+    snippet: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchLimits(BaseModel):
+    """Operational caps for one research operation (sandbox-style, not a second budget)."""
+
+    max_queries: int = 8
+    max_sources: int = 12
+    max_content_bytes: int = 200_000
+    timeout_seconds: float = 15.0
+    max_evidence_per_source: int = 3
+
+
+class ResearchResult(BaseModel):
+    """Structured output of a research operation."""
+
+    query: str
+    sources: list[SourceRecord] = Field(default_factory=list)
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    findings: list[ResearchFinding] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def provenance_rows(self) -> list[dict[str, Any]]:
+        """Flatten Claim-ready provenance: evidence → source → uri/hash/query."""
+        sources = {s.source_id: s for s in self.sources}
+        rows: list[dict[str, Any]] = []
+        for ev in self.evidence:
+            src = sources.get(ev.source_id)
+            rows.append(
+                {
+                    "evidence_id": ev.evidence_id,
+                    "source_id": ev.source_id,
+                    "uri": src.uri if src else None,
+                    "title": src.title if src else ev.location.title,
+                    "retrieved_at": (src.retrieved_at if src else ev.retrieved_at).isoformat(),
+                    "content_hash": src.content_hash if src else ev.content_hash,
+                    "source_type": src.source_type.value if src else None,
+                    "trust_tier": src.trust_tier.value if src else None,
+                    "query": self.query,
+                    "location": ev.location.model_dump(mode="json"),
+                }
+            )
+        return rows

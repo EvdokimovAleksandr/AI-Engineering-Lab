@@ -30,17 +30,18 @@
 
 ```
 USER
-  └─► Project (problem, constraints, risk class)
-        └─► ChiefEngineer (plan only → TaskGraph)
-              └─► Specialists (Research / Theorist / Computation)
-                    └─► Tools (sandbox, research, simulators…)
-                          └─► EvidenceGraph (versioned nodes)
-                                ├─► DeterministicChecks
-                                ├─► Verification (blind, optional separate model)
-                                └─► RedTeam (parallel, separate model)
-                                      └─► Adjudicator / HITL
-                                            └─► Synthesis (template from graph)
-                                                  └─► DecisionRecord (accepted | rejected | needs_evidence)
+  └─► Simple Local UI (optional) / CLI
+        └─► Project (problem, constraints, risk class)
+              └─► Planner (plan only → TaskGraph)
+                    └─► Specialists + EngineeringSolver (no new AgentRole)
+                          └─► Tools (sandbox, research) / in-process algebraic solver
+                                └─► EvidenceGraph (versioned nodes)
+                                      ├─► DeterministicChecks
+                                      ├─► Verification (blind, optional separate model)
+                                      └─► RedTeam (parallel, separate model)
+                                            └─► Adjudicator / HITL
+                                                  └─► Synthesis (template from graph)
+                                                        └─► DecisionRecord (accepted | rejected | needs_evidence)
 ```
 
 Experimental Design — отдельная стадия **только когда** risk class / HITL требует эмпирики; не обязательна в каждом run.
@@ -52,7 +53,7 @@ Experimental Design — отдельная стадия **только когд�
 | Layer | Keep from MVP | Change |
 |-------|---------------|--------|
 | `core/` | enums, protocols, pydantic | + EvidenceGraph types, RunManifest, RunBudget, ReviewBundle |
-| `llm/` | `LLMProvider` protocol, mock, factory | + routing; Cursor **reasoning-only**; OpenAI-compatible later |
+| `llm/` | `LLMProvider` protocol, mock, factory | + **LLMRouter** / `RoutingPolicy` (V2.4a); Cursor **reasoning-only**; OpenAI-compatible later |
 | `tools/` | registry, permissions, python sandbox | + taint; resource limits; new tools without agent rewrites |
 | `memory/` | ProjectStore path jail | + run-scoped dirs; graph store; no giant context |
 | `agents/` | thin role classes | strip authority; no final-truth write without gate |
@@ -167,18 +168,19 @@ artifact_root: projects/.../.runs/run_.../
 | Step | Owner |
 |------|-------|
 | Parse calculation claim → extract code/inputs | Deterministic |
-| Re-run code in sandbox | `python.execute` / checks service |
+| Re-run code in sandbox | `python.execute` → ComputeSandbox (`LocalSubprocessSandbox` or `DockerSandbox`) |
 | Compare numeric tolerance / units | Deterministic |
 | Interpret semantic discrepancies | Verification LLM (optional) |
 | Final gate PASS | Rules: all critical checks green **and** no unresolved CRITICAL RT (or HITL accept) |
 
 ### 5.2 Anti-collusion controls
 
-1. **Different models** for author vs verification vs red team when multiple providers available.
+1. **Different models** for author vs verification vs red team when the routing policy requires it (V2.4a `independence:`). This is architectural diversity, **not** `INDEPENDENT_EVIDENCE`.
 2. **Parallel** V and RT on same frozen bundle.
 3. **No shared draft workspace** during review.
 4. Record `agreement_type`: `CONSENSUS` | `INDEPENDENT_EVIDENCE` | `MIXED`.
 5. Majority vote **без** independent evidence **не** повышает confidence.
+6. `IndependenceLevel` (`FULL` / `PARTIAL` / `NONE`) classifies model/provider diversity only. See [multi-model-routing.md](multi-model-routing.md).
 
 ### 5.3 What Mock must prove
 
@@ -206,21 +208,13 @@ IterationPolicy:
     else → ANALYSIS
 ```
 
-### 6.2 TaskGraph (minimal)
+### 6.2 TaskGraph (V2.3 — implemented)
 
-Chief (or static template) emits tasks:
+See [taskgraph-planner.md](taskgraph-planner.md).
 
-```text
-TaskSpec:
-  id, role, objective
-  input_node_ids[]      # not free paths only
-  output_schema
-  independence_group
-  budget_slice
-```
+`TaskSpec` (existing type, evolved): `task_id`, `role`, `objective`, `inputs` (`input_node_ids` alias), `output_schema`, `depends_on`, `independence_group`, `budget_slice`.
 
-Orchestrator **исполняет граф**, а не игнорирует `follow_up_tasks`.  
-Для ранних проектов допустим **static template graph** (как сейчас STAGE_ROLES) — но как данные, не как скрытая логика Runtime.
+Planner emits `TaskGraphProposal`. Only a graph that passes `validate_task_graph` is executed. LLM never sets `ok`. `STAGE_ROLES` is compiled into data by `StaticPlanner`; it is not the runtime DAG. Verification ∥ Red Team remain a hard independence constraint.
 
 ### 6.3 Resume
 

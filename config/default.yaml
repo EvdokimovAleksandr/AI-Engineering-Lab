@@ -1,7 +1,7 @@
 # AI Engineering Lab — default configuration
-provider: mock  # mock | cursor_sdk
+provider: mock  # mock | cursor_sdk | replay
 
-# Per-role model IDs for CursorSDKProvider (ignored by MockProvider)
+# Per-role model IDs (identifiers only — not commercial lock-in)
 models:
   chief_engineer: composer-2.5
   research: composer-2.5
@@ -10,11 +10,39 @@ models:
   verification: composer-2.5
   red_team: composer-2.5
 
+# V2.4a: deterministic role → provider/model. Omitted fields inherit `provider` + `models`.
+# CI/demo default keeps every role on the top-level provider (mock) so tests stay offline.
+routing:
+  version: "1"
+  roles:
+    chief_engineer:
+      model: composer-2.5
+    research:
+      model: composer-2.5
+    theorist:
+      model: composer-2.5
+    simulation:
+      model: composer-2.5
+    verification:
+      model: composer-2.5
+    red_team:
+      model: composer-2.5
+  default:
+    model: composer-2.5
+
+# Model diversity ≠ evidence independence. Defaults are off so mock CI remains valid.
+independence:
+  require_different_model_from_author: false
+  require_different_provider_between_reviewers: false
+  require_different_model_between_reviewers: false
+
 runtime:
   max_iterations: 24
   # Stop and ask human on disputed/critical red-team findings
   hitl_on_disputed: true
   hitl_on_expensive_experiment: true
+  hitl_on_plan: false
+  planner: static  # static | llm — LLM proposes only; validator is authoritative
   parallel_independent_groups: true
   budget:
     max_iterations: 24
@@ -25,9 +53,32 @@ runtime:
     max_cost: 50.0
 
 sandbox:
-  timeout_seconds: 10
-  max_output_bytes: 200000
-  # AST whitelist for imports in agent-generated Python
+  backend: local_subprocess
+  fallback_backend: none  # never silently degrade docker → local
+  timeout_s: 10
+  timeout_seconds: 10  # alias of timeout_s
+  max_stdout_bytes: 200000
+  max_stderr_bytes: 200000
+  max_output_bytes: 200000  # alias used when stdout/stderr caps are omitted
+  memory_mb: 256
+  cpu_time_s: 10
+  network: deny
+  filesystem: run_scoped
+  kill_on_timeout: true
+  max_processes: 8
+  policy_version: v2.4c-1
+  # Docker-specific (used only when backend=docker). Image is trusted config, not ComputeSpec.
+  docker:
+    image: python:3.12-slim
+    image_digest: null  # pin sha256:<64 hex> for stronger identity; tag-only is PARTIAL
+    network: none
+    read_only_root: true
+    cap_drop_all: true
+    no_new_privileges: true
+    cpus: 1.0
+    non_root: true
+    user: "65534:65534"
+  # AST whitelist for python.execute (tool policy). Sandbox process still isolates execution.
   allowed_modules:
     - math
     - cmath
@@ -64,3 +115,34 @@ agents:
 
 observability:
   run_events_dir: .runs
+
+# Deterministic engineering verification (V2.2). In-process; not a second RunBudget.
+verification:
+  limits:
+    max_computation_seconds: 2
+    max_expression_chars: 2000
+    max_ast_nodes: 200
+    max_quantities: 32
+
+# Research pipeline (V2.2). backend=mock needs no credentials and keeps mock:// = STUB.
+research:
+  backend: mock  # mock | replay | web
+  # Extra hosts classified as manufacturer docs (PRIMARY). Empty by default — do not guess.
+  primary_hosts: []
+  web:
+    engine: duckduckgo  # duckduckgo (no key) | brave (BRAVE_SEARCH_API_KEY)
+    api_key_env: BRAVE_SEARCH_API_KEY
+  limits:
+    max_queries: 8
+    max_sources: 12
+    max_content_bytes: 200000
+    timeout_seconds: 15
+    max_evidence_per_source: 3
+
+# V2.5 trusted simulation policy. LLM/UI cannot add solvers or raise limits.
+simulation:
+  pipeline: default  # default | uniaxial_tension
+  allowed_solvers:
+    - uniaxial_tension
+  require_explicit_assumptions: true
+

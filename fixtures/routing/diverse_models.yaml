@@ -1,0 +1,38 @@
+# Author / verification / red_team use distinct mock model ids (no network).
+provider: mock
+models:
+  chief_engineer: model_a
+  research: model_a
+  theorist: model_a
+  simulation: model_a
+  verification: model_b
+  red_team: model_c
+routing:
+  version: "1"
+  roles:
+    chief_engineer:
+      provider: mock
+      model: model_a
+    research:
+      provider: mock
+      model: model_a
+    theorist:
+      provider: mock
+      model: model_a
+    simulation:
+      provider: mock
+      model: model_a
+    verification:
+      provider: mock
+      model: model_b
+    red_team:
+      provider: mock
+      model: model_c
+independence:
+  require_different_model_from_author: true
+  require_different_provider_between_reviewers: false
+  require_different_model_between_reviewers: true
+runtime:
+  planner: static
+  parallel_independent_groups: true
+  hitl_on_disputed: false

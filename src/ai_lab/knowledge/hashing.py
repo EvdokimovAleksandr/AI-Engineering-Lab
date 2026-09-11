@@ -16,12 +16,20 @@ def sha256_json(data: Any) -> str:
     return sha256_text(payload)
 
 
-def claim_content_hash(statement: str, kind: str, evidence: str | None, math_check: dict | None) -> str:
-    return sha256_json(
-        {
-            "statement": statement,
-            "kind": kind,
-            "evidence": evidence,
-            "math_check": math_check,
-        }
-    )
+def claim_content_hash(
+    statement: str,
+    kind: str,
+    evidence: str | None,
+    math_check: dict | None,
+    verification_spec: dict | None = None,
+) -> str:
+    payload: dict[str, Any] = {
+        "statement": statement,
+        "kind": kind,
+        "evidence": evidence,
+        "math_check": math_check,
+    }
+    # Omit when absent so existing hashes of claims without a spec stay stable.
+    if verification_spec is not None:
+        payload["verification_spec"] = verification_spec
+    return sha256_json(payload)

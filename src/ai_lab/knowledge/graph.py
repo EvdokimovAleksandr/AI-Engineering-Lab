@@ -89,18 +89,22 @@ class JsonEvidenceRepository:
                 f"Cross-project link requires SAME_AS, got {edge.edge_type}"
             )
 
-        # VERIFICATION must target a CLAIM (via TESTS or VERIFIED_BY orientation)
+        # CHECK or VERIFICATION may TESTS a CLAIM (deterministic result vs agent report)
         if edge.edge_type == GraphEdgeType.TESTS:
             src_type = nodes[edge.source_id].get("node_type")
             tgt_type = nodes[edge.target_id].get("node_type")
-            if src_type == GraphNodeType.VERIFICATION.value and tgt_type != GraphNodeType.CLAIM.value:
-                raise GraphIntegrityError("VERIFICATION TESTS edge must target a CLAIM")
+            if src_type in {
+                GraphNodeType.VERIFICATION.value,
+                GraphNodeType.CHECK.value,
+            } and tgt_type != GraphNodeType.CLAIM.value:
+                raise GraphIntegrityError("TESTS edge from VERIFICATION/CHECK must target a CLAIM")
         if edge.edge_type == GraphEdgeType.VERIFIED_BY:
-            # claim --VERIFIED_BY--> verification  OR verification as target
+            # claim --VERIFIED_BY--> verification|check  (or reversed)
             tgt_type = nodes[edge.target_id].get("node_type")
             src_type = nodes[edge.source_id].get("node_type")
-            if GraphNodeType.VERIFICATION.value not in {src_type, tgt_type}:
-                raise GraphIntegrityError("VERIFIED_BY must involve a VERIFICATION node")
+            review_types = {GraphNodeType.VERIFICATION.value, GraphNodeType.CHECK.value}
+            if not review_types.intersection({src_type, tgt_type}):
+                raise GraphIntegrityError("VERIFIED_BY must involve a VERIFICATION or CHECK node")
             if GraphNodeType.CLAIM.value not in {src_type, tgt_type}:
                 raise GraphIntegrityError("VERIFIED_BY must involve a CLAIM node")
 
@@ -206,6 +210,30 @@ class JsonEvidenceRepository:
                 ref_id=ref_id,
                 label=label or ref_id,
                 created_by=created_by,
+                **kwargs,
+            )
+        )
+
+    def ensure_edge(
+        self,
+        *,
+        edge_type: GraphEdgeType,
+        source_id: str,
+        target_id: str,
+        run_id: str | None = None,
+        **kwargs,
+    ) -> GraphEdge:
+        """Reuse an existing typed edge between the same endpoints (ingest idempotency)."""
+        for e in self.list_edges():
+            if e.edge_type == edge_type and e.source_id == source_id and e.target_id == target_id:
+                return e
+        return self.add_edge(
+            GraphEdge(
+                edge_type=edge_type,
+                source_id=source_id,
+                target_id=target_id,
+                project_id=self.project_id,
+                run_id=run_id,
                 **kwargs,
             )
         )

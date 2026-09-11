@@ -1,0 +1,24 @@
+{
+  "graph_id": "fixture_valid",
+  "version": 1,
+  "tasks": [
+    {
+      "task_id": "research",
+      "role": "research",
+      "objective": "Collect material properties",
+      "inputs": ["problem.md"],
+      "output_schema": "research_findings",
+      "depends_on": [],
+      "budget_slice": {"max_agent_calls": 1, "max_tool_calls": 5, "max_tokens": 1000, "max_cost": 0.1}
+    },
+    {
+      "task_id": "hypothesis",
+      "role": "theorist",
+      "objective": "Form hypotheses",
+      "inputs": ["research"],
+      "output_schema": "hypotheses",
+      "depends_on": ["research"],
+      "budget_slice": {"max_agent_calls": 1, "max_tool_calls": 5, "max_tokens": 1000, "max_cost": 0.1}
+    }
+  ]
+}

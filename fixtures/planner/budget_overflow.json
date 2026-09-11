@@ -1,0 +1,22 @@
+{
+  "graph_id": "fixture_budget",
+  "version": 1,
+  "tasks": [
+    {
+      "task_id": "a",
+      "role": "research",
+      "objective": "A",
+      "output_schema": "research_findings",
+      "depends_on": [],
+      "budget_slice": {"max_agent_calls": 80, "max_tool_calls": 1, "max_tokens": 1, "max_cost": 0.0}
+    },
+    {
+      "task_id": "b",
+      "role": "theorist",
+      "objective": "B",
+      "output_schema": "hypotheses",
+      "depends_on": ["a"],
+      "budget_slice": {"max_agent_calls": 80, "max_tool_calls": 1, "max_tokens": 1, "max_cost": 0.0}
+    }
+  ]
+}

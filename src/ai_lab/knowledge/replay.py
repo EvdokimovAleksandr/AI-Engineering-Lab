@@ -68,10 +68,34 @@ class ReplayProvider:
         rec = self.records.get(role) or self.records.get(bucket)
         if rec is None:
             raise KeyError(f"No replay fixture registered for role={role}")
+        # Same routing config must replay the same fixture; mismatches fail loud.
+        if rec.model and rec.model != "unknown" and request.model:
+            if rec.model != request.model:
+                raise KeyError(
+                    f"Replay fixture model mismatch for role={role}: "
+                    f"fixture={rec.model!r} request={request.model!r}"
+                )
+        if rec.routed_model:
+            expected_model = rec.routed_model.get("model")
+            if expected_model and request.model and expected_model != request.model:
+                raise KeyError(
+                    f"Replay routing model mismatch for role={role}: "
+                    f"fixture={expected_model!r} request={request.model!r}"
+                )
+        routing = {}
+        if rec.routing_policy_version or rec.routed_model:
+            routing = {
+                "model": rec.model,
+                "provider": rec.provider,
+                "routing_policy_version": rec.routing_policy_version,
+                "routed_model": rec.routed_model,
+            }
         return LLMResponse(
             content=json.dumps(rec.response),
             parsed=rec.response if isinstance(rec.response, dict) else None,
             model=rec.model,
             provider=self.name,
             run_id=rec.fixture_id,
+            routing_policy_version=rec.routing_policy_version,
+            routing=routing,
         )
