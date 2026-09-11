@@ -22,6 +22,8 @@ Problem → Decomposition → Research → Hypotheses → Analysis → Calculati
 - LLM abstraction: `mock` (по умолчанию) и `cursor_sdk` (ваш аккаунт Cursor)
 - Scaffold проекта `projects/spider_silk_industrial/`
 
+На другом устройстве без этого чата: см. [CONTINUE.md](CONTINUE.md).
+
 ## Быстрый старт
 
 ```bash
