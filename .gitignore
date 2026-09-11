@@ -1,0 +1,25 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.log
+.runs/
+
+# Runtime artifacts from lab runs (keep directory placeholders)
+projects/*/project_state.json
+projects/*/research/**
+projects/*/calculations/**
+projects/*/simulations/**
+projects/*/hypotheses/**
+projects/*/reviews/**
+projects/*/experiments/**
+projects/*/designs/**
+projects/*/decisions/**
+!projects/*/*/.gitkeep

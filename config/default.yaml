@@ -1,0 +1,59 @@
+# AI Engineering Lab — default configuration
+provider: mock  # mock | cursor_sdk
+
+# Per-role model IDs for CursorSDKProvider (ignored by MockProvider)
+models:
+  chief_engineer: composer-2.5
+  research: composer-2.5
+  theorist: composer-2.5
+  simulation: composer-2.5
+  verification: composer-2.5
+  red_team: composer-2.5
+
+runtime:
+  max_iterations: 24
+  # Stop and ask human on disputed/critical red-team findings
+  hitl_on_disputed: true
+  hitl_on_expensive_experiment: true
+  parallel_independent_groups: true
+
+sandbox:
+  timeout_seconds: 10
+  max_output_bytes: 200000
+  # AST whitelist for imports in agent-generated Python
+  allowed_modules:
+    - math
+    - cmath
+    - statistics
+    - decimal
+    - fractions
+    - json
+    - re
+    - typing
+    - dataclasses
+    - collections
+    - itertools
+    - functools
+    - operator
+    - numpy
+    - scipy
+    - sympy
+    - pandas
+    - matplotlib
+
+agents:
+  chief_engineer:
+    allowed_tools: [artifacts.save, artifacts.load, files.read, files.write]
+  research:
+    allowed_tools: [research.query, artifacts.save, artifacts.load, files.read]
+  theorist:
+    allowed_tools: [python.execute, artifacts.save, artifacts.load, files.read]
+  simulation:
+    allowed_tools: [python.execute, artifacts.save, artifacts.load, files.read]
+  verification:
+    allowed_tools: [python.execute, artifacts.save, artifacts.load, files.read]
+  red_team:
+    allowed_tools: [python.execute, artifacts.save, artifacts.load, files.read, research.query]
+
+observability:
+  run_events_dir: .runs
