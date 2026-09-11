@@ -26,6 +26,10 @@ class AgentContext:
     llm: Any  # LLMProvider Protocol
     config: LabConfig
     sink: RunEventSink
+    run_store: Any = None  # RunStore | None
+    graph: Any = None  # EvidenceGraph | JsonEvidenceRepository | None
+    knowledge: Any = None  # KnowledgeService | None
+    budget: Any = None  # RunBudget | None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def model_for(self, role: AgentRole) -> str | None:
@@ -45,8 +49,17 @@ async def llm_json(
     system: str,
     user: str,
     schema_name: str,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Call LLM and require parsed JSON object."""
+    from ai_lab.orchestrator.budget import record_agent_call
+
+    if ctx.budget is not None:
+        record_agent_call(ctx.budget)
+
+    metadata: dict[str, Any] = {"agent_role": role.value, "run_id": ctx.run_id}
+    if extra_metadata:
+        metadata.update(extra_metadata)
     request = LLMRequest(
         messages=[
             LLMMessage(role="system", content=system),
@@ -54,9 +67,12 @@ async def llm_json(
         ],
         model=ctx.model_for(role),
         response_schema_name=schema_name,
-        metadata={"agent_role": role.value, "run_id": ctx.run_id},
+        metadata=metadata,
     )
     response = await ctx.llm.complete(request)
+    if ctx.budget is not None and response.usage:
+        tokens = int(response.usage.get("total_tokens") or 0)
+        ctx.budget.tokens_used += tokens
     if response.parsed is None:
         raise RuntimeError(f"LLM provider {response.provider} returned no parsed JSON")
     return response.parsed

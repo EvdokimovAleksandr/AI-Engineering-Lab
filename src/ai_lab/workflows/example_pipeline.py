@@ -1,4 +1,8 @@
-"""Example stage → default agent roles mapping for MVP pipeline."""
+"""Example stage → default agent roles mapping for MVP pipeline.
+
+NOTE: This is a stage→roles table, NOT a dependency graph.
+Independent Verification ∥ Red Team is orchestrated inside LabRuntime at VERIFICATION.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +17,9 @@ STAGE_ROLES: dict[ProjectState, list[AgentRole]] = {
     ProjectState.ANALYSIS: [AgentRole.THEORIST],
     ProjectState.CALCULATION: [AgentRole.SIMULATION],
     ProjectState.SIMULATION: [AgentRole.SIMULATION],
-    ProjectState.VERIFICATION: [AgentRole.VERIFICATION],
-    ProjectState.RED_TEAM: [AgentRole.RED_TEAM],
+    # Handled specially: parallel Verification + Red Team (see LabRuntime._run_independent_review)
+    ProjectState.VERIFICATION: [],
+    ProjectState.RED_TEAM: [],  # merged into VERIFICATION parallel review
     ProjectState.SYNTHESIS: [AgentRole.CHIEF_ENGINEER],
     ProjectState.ITERATION_REQUIRED: [AgentRole.THEORIST, AgentRole.SIMULATION],
 }
-
-# Stages that should fan-out verification + red team independently when claims exist
-INDEPENDENT_REVIEW_GROUP = "independent_review"

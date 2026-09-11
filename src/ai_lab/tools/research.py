@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_lab.core.enums import EvidenceKind
+from ai_lab.core.enums import EvidenceKind, SourceTrustTier
 from ai_lab.core.models import Claim, ConfidenceBreakdown, ResearchFinding
 from ai_lab.tools.base import ToolSpec
 
@@ -14,6 +14,7 @@ class ResearchTool:
     Abstraction over literature/web search.
 
     MVP returns structured stub findings so the workflow is exercisable offline.
+    Sources are always STUB for mock:// URIs.
     """
 
     name = "research.query"
@@ -35,6 +36,7 @@ class ResearchTool:
                 ),
                 kind=EvidenceKind.INFERENCE,
                 source="mock://research-stub",
+                source_trust=SourceTrustTier.STUB,
                 evidence="Deterministic stub — replace with real search backend",
                 conditions={"backend": "stub"},
                 assumptions=["Stub corpus is illustrative only"],
@@ -51,4 +53,7 @@ class ResearchTool:
         return {
             "query": query,
             "findings": [finding.model_dump(mode="json")],
+            # Explicit taint (also set by ToolRegistry)
+            "trust_level": "EXTERNAL",
+            "data_not_instructions": True,
         }

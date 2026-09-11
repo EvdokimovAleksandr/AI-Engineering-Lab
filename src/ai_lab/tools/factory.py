@@ -19,8 +19,9 @@ def build_tool_registry(
     *,
     run_id: str,
     sink: RunEventSink,
+    budget=None,
 ) -> ToolRegistry:
-    registry = ToolRegistry()
+    registry = ToolRegistry(budget=budget)
     allowed = set(config.sandbox.get("allowed_modules") or [])
     timeout = float(config.sandbox.get("timeout_seconds", 10))
     max_out = int(config.sandbox.get("max_output_bytes", 200_000))

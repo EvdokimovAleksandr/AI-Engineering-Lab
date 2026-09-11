@@ -1,34 +1,44 @@
-"""Verification Agent — independent distrust of prior results."""
+"""Verification Agent — interprets DeterministicCheckReport; cannot override critical FAIL."""
 
 from __future__ import annotations
 
 from ai_lab.agents.base import AgentContext, BaseAgent, llm_json
-from ai_lab.core.enums import AgentRole, VerificationStatus
-from ai_lab.core.models import AgentResult, TaskSpec, VerificationReport
+from ai_lab.core.enums import AgreementType, AgentRole, VerificationStatus
+from ai_lab.core.models import AgentResult, ReviewBundle, TaskSpec, VerificationReport
 
 
 class VerificationAgent(BaseAgent):
     role = AgentRole.VERIFICATION
     system_prompt = (
         "You are the Verification Agent. Do NOT trust other agents. "
-        "Re-check assumptions, dimensions, and logic. "
-        "Status must be one of PASS, FAIL, DISPUTED, INSUFFICIENT_EVIDENCE. JSON only."
+        "You receive a blind ReviewBundle and DeterministicCheckReport. "
+        "If deterministic checks failed, status MUST be FAIL. "
+        "You may interpret but cannot override critical deterministic failures. JSON only."
     )
 
     async def run(self, task: TaskSpec, ctx: AgentContext) -> AgentResult:
         allowed = ctx.allowed_tools_for(self.role, task)
-        # Independent view: claims only, no author reasoning transcripts
-        claims = [c.model_dump(mode="json") for c in ctx.evidence.list_claims()]
+        bundle = await self._load_bundle(task, ctx)
+        check = bundle.check_report
+        det_fail = bool(check and check.has_critical_failure)
+        det_pass = bool(check and check.results and check.all_passed)
+        discrepancies = list(check.critical_failures) if check else []
+
         payload = await llm_json(
             ctx,
             role=self.role,
             system=self.system_prompt,
             user=(
-                f"Objective: {task.objective}\n"
-                f"Claims to verify (blind of author chat):\n{claims}\n"
+                "Blind ReviewBundle (no author confidence / no peer reviews):\n"
+                f"{bundle.model_dump(mode='json')}\n"
                 "Return JSON: {status, discrepancies, recomputed, notes}"
             ),
             schema_name="VerificationReport",
+            extra_metadata={
+                "deterministic_critical_failure": det_fail,
+                "deterministic_all_passed": det_pass,
+                "check_discrepancies": discrepancies,
+            },
         )
 
         status_raw = str(payload.get("status") or VerificationStatus.INSUFFICIENT_EVIDENCE.value)
@@ -37,13 +47,24 @@ class VerificationAgent(BaseAgent):
         except ValueError:
             status = VerificationStatus.INSUFFICIENT_EVIDENCE
 
+        # Hard gate: LLM cannot promote deterministic FAIL to PASS
+        if det_fail:
+            status = VerificationStatus.FAIL
+            discrepancies = list(dict.fromkeys(discrepancies + list(payload.get("discrepancies") or [])))
+
         report = VerificationReport(
-            target_claim_ids=[c["claim_id"] for c in claims],
+            target_claim_ids=list(bundle.target_claim_ids),
             status=status,
-            discrepancies=list(payload.get("discrepancies") or []),
+            discrepancies=discrepancies or list(payload.get("discrepancies") or []),
             recomputed=dict(payload.get("recomputed") or {}),
             notes=str(payload.get("notes") or ""),
             agent_id=self.role.value,
+            check_report_ids=[check.report_id] if check else [],
+            agreement_type=(
+                AgreementType.INDEPENDENT_EVIDENCE
+                if det_pass or det_fail
+                else AgreementType.CONSENSUS
+            ),
         )
         path = f"reviews/{report.report_id}.json"
         await ctx.tools.call(
@@ -52,13 +73,16 @@ class VerificationAgent(BaseAgent):
             path=path,
             data=report.model_dump(mode="json"),
         )
-        # Stable pointer for orchestrator
         await ctx.tools.call(
             "artifacts.save",
             allowed=allowed,
             path="reviews/last_verification.json",
             data=report.model_dump(mode="json"),
         )
+        if ctx.run_store is not None:
+            ctx.run_store.save_review_json(
+                f"{report.report_id}.json", report.model_dump(mode="json")
+            )
 
         return AgentResult(
             agent_role=self.role,
@@ -68,3 +92,10 @@ class VerificationAgent(BaseAgent):
             artifact_paths=[path, "reviews/last_verification.json"],
             raw=payload,
         )
+
+    async def _load_bundle(self, task: TaskSpec, ctx: AgentContext) -> ReviewBundle:
+        if task.review_bundle_path:
+            data = ctx.store.read_json(task.review_bundle_path)
+            return ReviewBundle.model_validate(data)
+        # Fallback for unit tests: empty bundle
+        return ReviewBundle(run_id=ctx.run_id, claims=[])

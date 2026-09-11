@@ -1,4 +1,4 @@
-"""Workflow transition table — non-linear, supports iteration."""
+"""Workflow transition table — non-linear, supports iteration and budget stop."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from ai_lab.core.enums import AttackSeverity, ProjectState, VerificationStatus
 from ai_lab.core.models import RedTeamReport, VerificationReport
 
 
-# Default forward path when a stage succeeds without disputes
+# Default forward path when a stage succeeds without disputes.
+# Independent review (V∥RT + adjudication) is handled in LabRuntime, not via advance().
 FORWARD: dict[ProjectState, ProjectState] = {
     ProjectState.CREATED: ProjectState.UNDERSTANDING,
     ProjectState.UNDERSTANDING: ProjectState.DECOMPOSITION,
@@ -16,8 +17,9 @@ FORWARD: dict[ProjectState, ProjectState] = {
     ProjectState.ANALYSIS: ProjectState.CALCULATION,
     ProjectState.CALCULATION: ProjectState.SIMULATION,
     ProjectState.SIMULATION: ProjectState.VERIFICATION,
-    ProjectState.VERIFICATION: ProjectState.RED_TEAM,
-    ProjectState.RED_TEAM: ProjectState.SYNTHESIS,
+    # After parallel review + adjudication PASS, runtime jumps to SYNTHESIS directly.
+    ProjectState.VERIFICATION: ProjectState.SYNTHESIS,
+    ProjectState.RED_TEAM: ProjectState.SYNTHESIS,  # legacy path if entered
     ProjectState.SYNTHESIS: ProjectState.COMPLETED,
     ProjectState.ITERATION_REQUIRED: ProjectState.ANALYSIS,
     ProjectState.DISPUTED: ProjectState.AWAITING_HUMAN,
@@ -28,11 +30,11 @@ def next_after_verification(
     current: ProjectState,
     report: VerificationReport,
 ) -> ProjectState:
-    """Verification FAIL / DISPUTED / INSUFFICIENT → iterate; PASS → continue."""
+    """Legacy helper — prefer adjudication in LabRuntime for V∥RT."""
     if current != ProjectState.VERIFICATION:
         raise ValueError(f"next_after_verification called in state {current}")
     if report.status == VerificationStatus.PASS:
-        return ProjectState.RED_TEAM
+        return ProjectState.SYNTHESIS
     if report.status in {
         VerificationStatus.FAIL,
         VerificationStatus.DISPUTED,
@@ -48,7 +50,7 @@ def next_after_red_team(
     *,
     hitl_on_disputed: bool = True,
 ) -> ProjectState:
-    """Critical red-team findings → DISPUTED / HITL; else SYNTHESIS."""
+    """Legacy helper for standalone red-team stage."""
     if current != ProjectState.RED_TEAM:
         raise ValueError(f"next_after_red_team called in state {current}")
     severity = report.max_severity

@@ -1,79 +1,79 @@
-# Architecture — AI Engineering Lab
+# Architecture — AI Engineering Lab (post V2 P0/P1)
+
+> Исторический аудит: [architecture-audit.md](architecture-audit.md)  
+> Целевая модель: [architecture-v2.md](architecture-v2.md)  
+> Что реализовано: [architecture-v2-implementation.md](architecture-v2-implementation.md)
 
 ## Цель
 
-Повышать вероятность **корректного** инженерного результата за счёт декомпозиции, независимой проверки и red team — не за счёт объёма текста или числа агентов.
+Повышать вероятность **корректного** инженерного результата за счёт декомпозиции, **deterministic checks**, независимой проверки (blind ReviewBundle), red team и adjudication — не за счёт объёма текста или числа агентов.
+
+## Фактическая оркестрация
+
+Оркестратор использует **таблицу** `STAGE_ROLES` (stage → roles) + FSM. Это **не** dependency graph.
+
+На стадии `VERIFICATION` runtime выполняет:
+
+1. `DeterministicCheckReport` (MathCheck / recompute)
+2. Frozen `ReviewBundle` (без author confidence)
+3. **Параллельно** Verification ∥ Red Team (общий bundle, без результатов друг друга)
+4. `Adjudication` (LLM не может перекрыть deterministic FAIL → PASS)
+5. PASS → SYNTHESIS | иначе → `IterationPolicy` re-entry
 
 ## Слои
 
 | Слой | Ответственность |
 |------|-----------------|
-| `core/` | Enums, Pydantic-модели, Protocol'ы. Не зависит от agents/tools. |
-| `llm/` | `MockProvider`, `CursorSDKProvider`, factory. |
-| `tools/` | Sandbox Python, files, artifacts, research stub, permissions. |
-| `memory/` | ProjectStore, EvidenceStore, DecisionLog. |
-| `agents/` | Роли лаборатории (тонкие: prompt + валидация + tools). |
-| `workflows/` | State machine и переходы. |
-| `orchestrator/` | Сборка графа зависимостей и цикл run. |
-| `observability/` | Logger + JSONL run events (задел под tracing). |
+| `core/` | Enums, модели (Claim versioning, RunManifest, ReviewBundle, Graph…) |
+| `checks/` | Deterministic MathCheck |
+| `llm/` | `MockProvider`, `CursorSDKProvider` (reasoning-only) |
+| `tools/` | Registry + permissions + **trust_level** taint |
+| `memory/` | ProjectStore, EvidenceStore, EvidenceGraph, RunStore, ReviewBundle |
+| `agents/` | 6 ролей (без новых) |
+| `workflows/` | FSM + transitions |
+| `orchestrator/` | LabRuntime, budget, adjudication, synthesis gate, iteration policy |
 
 ## Поток данных
 
-1. Human создаёт/выбирает `projects/<name>/` с `problem.md`.
-2. `LabRuntime` загружает config, LLM provider, tools, agents.
-3. На каждом `ProjectState` оркестратор ставит `TaskSpec` нужным ролям.
-4. Агент вызывает LLM (structured JSON) и разрешённые tools.
-5. Claims/hypotheses/reports пишутся в память проекта.
-6. Verification / Red Team получают **артефакты claims**, не чужие chat-транскрипты.
-7. `WorkflowEngine` выбирает следующее состояние (в т.ч. назад на итерацию).
-8. Decision Log фиксирует «почему так решили».
-
-## Независимая проверка
-
 ```
-Claim artifacts ──► VerificationAgent
-                 └──► RedTeamAgent
-                        └──► ChiefEngineer (synthesis)
+USER → Chief → specialists → tools → artifacts / evidence graph
+  → deterministic checks → ReviewBundle
+  → Verification ∥ Red Team → Adjudication
+  → FAIL: IterationPolicy | PASS: SynthesisBundle → final_report.md
 ```
 
-Не каскад «все согласились».
+## Final report gate
 
-## MVP vs extension points
+`final_report.md` строится из `SynthesisBundle` (accepted/disputed/rejected + V/RT + residual risks).  
+LLM может добавить prose, но **не** определяет, что доказано.  
+DISPUTED/FAIL/INCOMPLETE явно маркируются как недоказанные.
 
-**MVP:** 6 агентов, mock+cursor LLM, subprocess sandbox, research stub, spider silk scaffold, CLI run.
+## Reproducibility
 
-**Позже (точки расширения, без кода в MVP):**
-
-- Engineering Designer / Experimental Scientist (enum уже есть)
-- Real web/patent research backend за `research.query`
-- Docker / cgroup sandbox вместо subprocess
-- OpenAI-compatible provider (достаточно нового класса под `LLMProvider`)
-- FEM/CFD/CAD/Jupyter tools в `tools/`
-- OpenTelemetry exporter вместо/поверх JSONL sink
-- Cloud Cursor agents как workers (не как замена orchestrator)
-
-## Пример прогона (mock)
-
-```bash
-python -m ai_lab run projects/spider_silk_industrial --provider mock
-```
-
-Ожидаемое поведение:
-
-1. UNDERSTANDING / DECOMPOSITION — Chief Engineer
-2. RESEARCH → hypotheses/analysis → simulation (реальный python.execute)
-3. Первая VERIFICATION → `DISPUTED` → `ITERATION_REQUIRED`
-4. Повторный цикл → VERIFICATION `PASS` → RED_TEAM (MEDIUM attacks)
-5. SYNTHESIS → `final_report.md` → COMPLETED
-
-Артефакты: `research/`, `calculations/`, `simulations/`, `reviews/`, `decisions/decision_log.jsonl`, `.runs/<run_id>.jsonl`.
+Каждый run: `projects/<name>/.runs/<run_id>/manifest.json` + immutable `computations/*.json`.
 
 ## Safety
 
-- Агенты не получают произвольный shell.
-- Python: AST whitelist imports, banned `eval/exec/open`, timeout, isolated `-I`, урезанный env.
-- Files/artifacts только внутри project root.
+- Python sandbox (AST whitelist, timeout, isolated `-I`)
+- Path jail в ProjectStore
+- CursorSDK: **reasoning-only** temp cwd (не project root)
+- Research tool output: `trust_level=EXTERNAL`, `data_not_instructions=true`
+- `mock://` sources = STUB, cannot be FACT
 
-## Human in the loop
+## HITL
 
-HITL срабатывает на критическом red team (или явном `HitlRequest`), не на каждом шаге. Тесты могут `--auto-approve-hitl`.
+- Critical disputed red-team findings
+- `AgentResult.hitl_request` → `AWAITING_HUMAN`
+- Resume: `--resume` / same `run_id` in `project_state.json`
+- Tests: `--auto-approve-hitl`
+
+## CLI
+
+```bash
+python -m ai_lab run projects/spider_silk_industrial --provider mock
+python -m ai_lab run projects/spider_silk_industrial --resume --auto-approve-hitl
+```
+
+## Knowledge layer (V2.1)
+
+Claims are **run-scoped** (`.runs/<run_id>/claims/`). Agents use visibility policies (`CURRENT_RUN` / `PROJECT_HISTORY` / `APPROVED_KNOWLEDGE`). Evidence graph + query API live under `knowledge/`. See [knowledge-architecture.md](knowledge-architecture.md).

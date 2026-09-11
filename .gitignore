@@ -22,4 +22,7 @@ projects/*/reviews/**
 projects/*/experiments/**
 projects/*/designs/**
 projects/*/decisions/**
+projects/*/knowledge/**
+projects/*/.runs/**
+projects/*/final_report.md
 !projects/*/*/.gitkeep

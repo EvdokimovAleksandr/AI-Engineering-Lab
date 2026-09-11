@@ -49,4 +49,6 @@ class WorkflowEngine:
         return self.snapshot.state in {
             ProjectState.COMPLETED,
             ProjectState.AWAITING_HUMAN,
+            ProjectState.BUDGET_EXCEEDED,
+            ProjectState.DISPUTED,
         }

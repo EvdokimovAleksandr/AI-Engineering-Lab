@@ -19,9 +19,12 @@ def test_verification_fail_goes_to_iteration() -> None:
     )
 
 
-def test_verification_pass_goes_to_red_team() -> None:
+def test_verification_pass_goes_to_synthesis() -> None:
     report = VerificationReport(status=VerificationStatus.PASS)
-    assert next_after_verification(ProjectState.VERIFICATION, report) == ProjectState.RED_TEAM
+    assert (
+        next_after_verification(ProjectState.VERIFICATION, report)
+        == ProjectState.SYNTHESIS
+    )
 
 
 def test_red_team_critical_awaits_human() -> None:

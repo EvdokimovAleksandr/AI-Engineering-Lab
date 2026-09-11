@@ -21,6 +21,7 @@ class ProjectState(str, Enum):
     DISPUTED = "DISPUTED"
     ITERATION_REQUIRED = "ITERATION_REQUIRED"
     AWAITING_HUMAN = "AWAITING_HUMAN"
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     COMPLETED = "COMPLETED"
 
 
@@ -69,3 +70,111 @@ class AttackSeverity(str, Enum):
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
+
+
+class TrustLevel(str, Enum):
+    """Taint label for tool outputs — LLM must treat EXTERNAL/UNTRUSTED as data only."""
+
+    TRUSTED = "TRUSTED"
+    INTERNAL = "INTERNAL"
+    UNTRUSTED = "UNTRUSTED"
+    EXTERNAL = "EXTERNAL"
+
+
+class SourceTrustTier(str, Enum):
+    """Research source authenticity. mock:// is always STUB."""
+
+    STUB = "STUB"
+    SECONDARY = "SECONDARY"
+    PRIMARY = "PRIMARY"
+
+
+class AgreementType(str, Enum):
+    """Consensus among agents is weaker than independent recompute/measurement."""
+
+    CONSENSUS = "CONSENSUS"
+    INDEPENDENT_EVIDENCE = "INDEPENDENT_EVIDENCE"
+    MIXED = "MIXED"
+
+
+class GraphNodeType(str, Enum):
+    PROJECT = "PROJECT"
+    RUN = "RUN"
+    SOURCE = "SOURCE"
+    CLAIM = "CLAIM"
+    ASSUMPTION = "ASSUMPTION"
+    HYPOTHESIS = "HYPOTHESIS"
+    CALCULATION = "CALCULATION"
+    SIMULATION = "SIMULATION"
+    EXPERIMENT = "EXPERIMENT"
+    CHECK = "CHECK"
+    VERIFICATION = "VERIFICATION"
+    RED_TEAM = "RED_TEAM"
+    ADJUDICATION = "ADJUDICATION"
+    DECISION = "DECISION"
+    CONCLUSION = "CONCLUSION"
+    CONFLICT = "CONFLICT"
+
+
+class GraphEdgeType(str, Enum):
+    DERIVED_FROM = "DERIVED_FROM"
+    SUPPORTS = "SUPPORTS"
+    CONTRADICTS = "CONTRADICTS"
+    TESTS = "TESTS"
+    VERIFIED_BY = "VERIFIED_BY"
+    REJECTED_BY = "REJECTED_BY"
+    REFUTES = "REFUTES"
+    DEPENDS_ON = "DEPENDS_ON"
+    SUPERSEDES = "SUPERSEDES"
+    PART_OF = "PART_OF"
+    CREATED_IN = "CREATED_IN"
+    USES = "USES"
+    SAME_AS = "SAME_AS"
+    ACCEPTS = "ACCEPTS"
+    CITES = "CITES"
+    DEMOTED_BY = "DEMOTED_BY"
+
+
+class ClaimLifecycle(str, Enum):
+    ACTIVE = "ACTIVE"
+    SUPERSEDED = "SUPERSEDED"
+    REJECTED = "REJECTED"
+    DISPUTED = "DISPUTED"
+    ARCHIVED = "ARCHIVED"
+    DEMOTED = "DEMOTED"
+
+
+class ClaimVisibility(str, Enum):
+    """What claim set an agent/query may see."""
+
+    CURRENT_RUN = "CURRENT_RUN"
+    PROJECT_HISTORY = "PROJECT_HISTORY"
+    APPROVED_KNOWLEDGE = "APPROVED_KNOWLEDGE"
+
+
+class EvidenceStrength(str, Enum):
+    """Provenance classification — not a magic confidence score."""
+
+    PRIMARY_EXPERIMENT = "PRIMARY_EXPERIMENT"
+    PRIMARY_CALCULATION = "PRIMARY_CALCULATION"
+    INDEPENDENT_RECOMPUTE = "INDEPENDENT_RECOMPUTE"
+    PRIMARY_SOURCE = "PRIMARY_SOURCE"
+    SECONDARY_SOURCE = "SECONDARY_SOURCE"
+    AI_CLAIM = "AI_CLAIM"
+    CONSENSUS = "CONSENSUS"
+
+
+class ConflictStatus(str, Enum):
+    OPEN = "OPEN"
+    RESOLVED = "RESOLVED"
+    ACCEPTED_A = "ACCEPTED_A"
+    ACCEPTED_B = "ACCEPTED_B"
+    BOTH_UNRESOLVED = "BOTH_UNRESOLVED"
+    HUMAN_REVIEW = "HUMAN_REVIEW"
+
+
+class AdjudicationStatus(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    DISPUTED = "DISPUTED"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"

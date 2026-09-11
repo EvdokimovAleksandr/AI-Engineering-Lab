@@ -1,4 +1,4 @@
-"""End-to-end mock orchestrator run on spider silk scaffold."""
+"""End-to-end mock orchestrator run on spider silk scaffold (V2 gates)."""
 
 from pathlib import Path
 
@@ -18,7 +18,6 @@ REPO = Path(__file__).resolve().parents[1]
 def _copy_scaffold(dst: Path) -> None:
     src = REPO / "projects" / "spider_silk_industrial"
     store = ProjectStore(dst)
-    # Minimal copy of required files
     for name in ("problem.md", "requirements.md", "assumptions.md", "final_report.md"):
         (dst / name).write_text((src / name).read_text(encoding="utf-8"), encoding="utf-8")
     store.ensure_layout()
@@ -45,12 +44,17 @@ async def test_orchestrator_mock_run(tmp_path: Path) -> None:
     snapshot = await runtime.run()
 
     assert snapshot.state == ProjectState.COMPLETED
-    assert snapshot.iteration >= 1  # first verification disputed → iterate
     assert (project_dir / "research" / "research_batch.json").exists()
     assert (project_dir / "reviews" / "last_verification.json").exists()
     assert (project_dir / "reviews" / "last_red_team.json").exists()
-    assert (project_dir / "simulations" / "last_run.json").exists()
-    assert (project_dir / "decisions" / "decision_log.jsonl").exists()
+    assert (project_dir / "reviews" / "synthesis_bundle.json").exists()
+    assert (project_dir / "reviews" / "last_adjudication.json").exists()
+    assert (project_dir / ".runs" / snapshot.run_id / "manifest.json").exists()
+    comps = list((project_dir / ".runs" / snapshot.run_id / "computations").glob("*.json"))
+    assert comps, "expected immutable computation artifacts"
     final = (project_dir / "final_report.md").read_text(encoding="utf-8")
     assert "Final report" in final
+    assert "Report gate" in final
+    assert "Verification" in final
+    assert "Red team" in final
     assert "Awaiting lab synthesis" not in final

@@ -8,21 +8,30 @@
 
 ```
 Problem → Decomposition → Research → Hypotheses → Analysis → Calculation
-→ Simulation → Verification → Red Team → Synthesis
+→ Simulation → [Deterministic Checks → Verification ∥ Red Team → Adjudication]
+→ Synthesis (gated) | IterationPolicy
 ```
 
 Несогласие агентов — нормальный и желаемый исход. Каждое существенное утверждение должно иметь вид, источник/обоснование, допущения, falsifiers и confidence breakdown.
 
-## MVP (что уже есть)
+## MVP / V2 (что уже есть)
 
 - 6 агентов: Chief Engineer, Research, Theorist, Simulation, Verification, Red Team
-- Workflow state machine (нелинейный: FAIL → ITERATION_REQUIRED)
-- Project memory + Decision Log (JSONL)
-- Tools: Python sandbox, files, artifacts, research stub, logging
-- LLM abstraction: `mock` (по умолчанию) и `cursor_sdk` (ваш аккаунт Cursor)
-- Scaffold проекта `projects/spider_silk_industrial/`
+- Stage table `STAGE_ROLES` + FSM (не dependency graph)
+- Parallel independent review: Verification ∥ Red Team + Adjudication
+- Deterministic MathCheck; LLM cannot override critical FAIL
+- SynthesisBundle → gated `final_report.md`
+- RunManifest + immutable computation artifacts under `.runs/<run_id>/`
+- RunBudget (agent/tool/token/time/cost caps)
+- Evidence graph (JSON), claim versioning, ReviewBundle (blind)
+- Tools: Python sandbox, files, artifacts, research stub (EXTERNAL taint)
+- LLM: `mock` | `cursor_sdk` (reasoning-only cwd)
+- Scaffold: `projects/spider_silk_industrial/`
 
-На другом устройстве без этого чата: см. [CONTINUE.md](CONTINUE.md).
+## Knowledge (V2.1)
+
+Run-scoped claims, ApprovedKnowledge, evidence graph queries, conflicts, and migration:
+see [knowledge-architecture.md](docs/knowledge-architecture.md) and [knowledge-migration.md](docs/knowledge-migration.md).
 
 ## Быстрый старт
 
@@ -47,7 +56,7 @@ pytest
 4. В `config/default.yaml` поставьте `provider: cursor_sdk` (или `--provider cursor_sdk`)
 5. Модели на роль задаются в `config/default.yaml` → `models:`
 
-`CursorSDKProvider` использует one-shot `Agent.prompt` только как reasoning backend. Compute и запись артефактов идут через tool layer лаборатории.
+`CursorSDKProvider` — **reasoning-only**: temporary empty cwd (not the project root), JSON-only prompts, no FS side effects. All compute/writes go through ToolRegistry. Limitation: if a future SDK ignores cwd isolation, treat as untrusted — see implementation report.
 
 Если выбран `cursor_sdk`, но нет ключа или пакета — система **упадёт явно** (без silent fallback).
 
@@ -64,7 +73,7 @@ tests/               # критические тесты
 ## CLI
 
 ```bash
-python -m ai_lab run <project_name_or_path> [--provider mock|cursor_sdk] [--config path]
+python -m ai_lab run <project_name_or_path> [--provider mock|cursor_sdk] [--config path] [--resume] [--auto-approve-hitl]
 ```
 
 ## Философия

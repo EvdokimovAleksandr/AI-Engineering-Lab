@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Auto-approve human gates (tests/demo only)",
     )
+    run_p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an interrupted run using project_state.json run_id",
+    )
     return parser
 
 
@@ -68,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
                     projects_dir=projects_dir,
                     config_path=args.config,
                     auto_approve_hitl=args.auto_approve_hitl,
+                    resume=bool(getattr(args, "resume", False)),
                 )
             )
         except Exception as exc:
