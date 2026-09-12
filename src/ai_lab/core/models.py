@@ -442,6 +442,8 @@ class LabConfig(BaseModel):
     independence: dict[str, Any] = Field(default_factory=dict)
     # V2.5: trusted solver registry / pipeline. Not accepted from UI or LLM.
     simulation: dict[str, Any] = Field(default_factory=dict)
+    # Task Router (workflow profile). Distinct from routing: (LLM model routing).
+    task_routing: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("provider")
     @classmethod
@@ -770,6 +772,9 @@ class RunManifest(BaseModel):
     sandbox_backend: str | None = None
     sandbox_policy_version: str | None = None
     sandbox_capabilities: dict[str, Any] | None = None
+    # Task Router decision snapshot (workflow profile). Optional for older manifests.
+    task_routing_decision: dict[str, Any] | None = None
+    workflow_profile: str | None = None
 
 
 class GraphNode(BaseModel):

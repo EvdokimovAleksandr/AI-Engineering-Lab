@@ -48,6 +48,8 @@ python -m ai_lab run projects/spider_silk_industrial --provider mock
 | [docs/compute-sandbox.md](docs/compute-sandbox.md) | ComputeSpec, LocalSubprocessSandbox, честные Windows guarantees |
 | [docs/docker-sandbox.md](docs/docker-sandbox.md) | DockerSandbox, image pinning, HARD network/fs, TCB |
 | [docs/engineering-simulation.md](docs/engineering-simulation.md) | SimulationSpec, UniaxialTensionSolver, synthetic tensile benchmark |
+| [docs/task-routing.md](docs/task-routing.md) | Task Router: complexity/risk/uncertainty → workflow profiles |
+| [docs/benchmarks.md](docs/benchmarks.md) | simple_heater / shaft_design / spider_silk_review |
 | [docs/ui.md](docs/ui.md) | local HTML UI over LabRuntime |
 | [config/default.yaml](config/default.yaml) | provider, модели, sandbox, HITL, research/verification limits |
 | [projects/spider_silk_industrial/problem.md](projects/spider_silk_industrial/problem.md) | первый benchmark-проект |

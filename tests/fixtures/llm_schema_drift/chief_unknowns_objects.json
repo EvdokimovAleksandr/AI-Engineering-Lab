@@ -1,0 +1,15 @@
+{
+  "summary": "Closed-form heater power",
+  "understanding": "Need P = m * cp * dT / eta",
+  "unknowns": [
+    {
+      "id": "loss_interpretation",
+      "statement": "Потери сверху трактуются как запас по мощности."
+    },
+    {
+      "id": "water_properties",
+      "text": "Теплоёмкость воды при 20 C, погрешность <1%."
+    }
+  ],
+  "follow_up_roles": ["simulation"]
+}

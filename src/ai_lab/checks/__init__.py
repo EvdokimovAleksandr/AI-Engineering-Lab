@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
-from ai_lab.checks.math_check import math_result_from_verification, run_math_check
+from ai_lab.checks.math_check import math_result_from_verification, normalize_math_check_payload, run_math_check
 from ai_lab.checks.verifier import DeterministicVerifier, limits_from_config
 from ai_lab.core.models import (
     BlindClaimView,
@@ -54,7 +54,10 @@ async def run_deterministic_checks(
             continue
         if not claim.math_check:
             continue
-        req = MathCheckRequest.model_validate({**claim.math_check, "claim_id": claim.claim_id})
+        normalized = normalize_math_check_payload(
+            {**claim.math_check, "claim_id": claim.claim_id}
+        )
+        req = MathCheckRequest.model_validate(normalized)
         result = await run_math_check(req, execute_code=execute_code, verifier=engine)
         results.append(result)
         if result.verification_result is not None:

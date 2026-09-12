@@ -189,6 +189,20 @@ def render_final_report(bundle: SynthesisBundle, *, llm_polish: dict | None = No
     return "\n".join(lines)
 
 
-def synthesis_allowed(bundle: SynthesisBundle) -> bool:
-    """Final report file may be written; content always reflects gate honestly."""
-    return bundle.verification_reports and bundle.red_team_reports
+def synthesis_allowed(
+    bundle: SynthesisBundle,
+    *,
+    require_independent_review: bool = True,
+    require_red_team: bool = True,
+) -> bool:
+    """Final report file may be written; content always reflects gate honestly.
+
+    SIMPLE profile: adjudication + deterministic path — V/RT reports not required.
+    STANDARD: verification required; red team optional.
+    COMPLEX/RESEARCH: both required (defaults).
+    """
+    if not require_independent_review:
+        return bundle.adjudication_status == AdjudicationStatus.PASS
+    if not require_red_team:
+        return bool(bundle.verification_reports)
+    return bool(bundle.verification_reports and bundle.red_team_reports)

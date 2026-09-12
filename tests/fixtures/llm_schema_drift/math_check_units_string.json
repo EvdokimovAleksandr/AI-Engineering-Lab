@@ -1,0 +1,8 @@
+{
+  "expression": "(force_n / (3.14159 * (diameter_m / 2) ** 2))",
+  "expected": "127.32",
+  "tolerance": "1e-3",
+  "inputs": {"force_n": 100, "diameter_m": 0.05},
+  "units": "m^4",
+  "required_units": {"force_n": "N", "diameter_m": "m"}
+}

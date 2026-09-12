@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ai_lab.agents.base import AgentContext, BaseAgent, llm_json
+from ai_lab.agents.base import AgentContext, BaseAgent, coerce_str_list, llm_json
 from ai_lab.core.enums import AgentRole, EvidenceKind, SourceTrustTier
 from ai_lab.core.models import (
     AgentResult,
@@ -73,8 +73,8 @@ class ResearchAgent(BaseAgent):
                 source_trust=source_trust,
                 evidence=item.get("evidence"),
                 conditions=conditions,
-                assumptions=list(item.get("assumptions") or []),
-                falsifiers=list(item.get("falsifiers") or []),
+                assumptions=coerce_str_list(item.get("assumptions")),
+                falsifiers=coerce_str_list(item.get("falsifiers")),
                 agent_id=self.role.value,
                 refs=refs,
                 confidence=ConfidenceBreakdown(

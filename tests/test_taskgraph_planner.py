@@ -491,7 +491,7 @@ async def test_cli_plan_writes_run_scoped_artifacts(tmp_path: Path) -> None:
         projects_dir=tmp_path,
         auto_approve_hitl=True,
     )
-    assert graph.graph_id == "static_pipeline"
+    assert graph.graph_id == "standard_pipeline"
     assert validation["ok"] is True
     run_dirs = list((project_dir / ".runs").iterdir())
     assert run_dirs
@@ -499,6 +499,7 @@ async def test_cli_plan_writes_run_scoped_artifacts(tmp_path: Path) -> None:
     assert (planner_dir / "task_graph.json").is_file()
     assert (planner_dir / "validation.json").is_file()
     assert (planner_dir / "proposal.json").is_file()
+    assert (planner_dir / "task_routing.json").is_file()
     # Planning must not run the research pipeline.
     assert not (project_dir / "research" / "research_batch.json").exists()
 

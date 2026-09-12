@@ -30,6 +30,9 @@ where = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Live Cursor calls are opt-in: pytest -m cursor
+addopts = "-m 'not cursor'"
 markers = [
     "docker: requires Docker engine and the configured image (skipped if unavailable)",
+    "cursor: live Cursor SDK call (needs CURSOR_API_KEY + pip install '.[cursor]')",
 ]

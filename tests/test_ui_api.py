@@ -105,7 +105,7 @@ def test_plan_creation_and_status(tmp_path: Path) -> None:
     assert created["run_id"]
     assert created["state"] == "PLANNED"
     st = get_status(created["run_id"], repo_root=REPO, projects_dir=pdir)
-    assert st["graph_id"] == "static_pipeline"
+    assert st["graph_id"] == "standard_pipeline"
     res = get_result(created["run_id"], repo_root=REPO, projects_dir=pdir)
     assert res["run_id"] == created["run_id"]
     ui_problem = (pdir / "spider_silk_industrial" / ".runs" / created["run_id"] / "inputs" / "ui_problem.md")
@@ -175,4 +175,4 @@ def test_ui_plan_writes_existing_run_artifacts(tmp_path: Path) -> None:
     assert (run_dir / "planner" / "task_graph.json").is_file()
     assert (run_dir / "planner" / "validation.json").is_file()
     graph = json.loads((run_dir / "planner" / "task_graph.json").read_text(encoding="utf-8"))
-    assert graph["graph_id"] == "static_pipeline"
+    assert graph["graph_id"] == "standard_pipeline"

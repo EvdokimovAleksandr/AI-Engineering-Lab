@@ -7,9 +7,23 @@ from ai_lab.planner.llm import LLMPlanner
 from ai_lab.planner.static import StaticPlanner
 
 
-def create_planner(config: LabConfig, *, llm: object | None = None) -> StaticPlanner | LLMPlanner:
+def create_planner(
+    config: LabConfig,
+    *,
+    llm: object | None = None,
+    pipeline_override: str | None = None,
+) -> StaticPlanner | LLMPlanner:
+    """Build a planner.
+
+    `pipeline_override` comes from TaskRouter (trusted runtime decision),
+    not from LLM/UI text. Explicit simulation.pipeline=uniaxial_tension
+    still wins when override is omitted.
+    """
     kind = str((config.runtime or {}).get("planner") or "static").strip().lower()
-    pipeline = str((config.simulation or {}).get("pipeline") or "default").strip().lower()
+    if pipeline_override:
+        pipeline = pipeline_override.strip().lower()
+    else:
+        pipeline = str((config.simulation or {}).get("pipeline") or "default").strip().lower()
     if kind == "static":
         return StaticPlanner(pipeline=pipeline)
     if kind == "llm":

@@ -1,0 +1,11 @@
+{
+  "expression": "m * cp * dT",
+  "expected": 418400.0,
+  "inputs": [
+    {"name": "m", "value": 10},
+    {"name": "cp", "value": 4184},
+    {"id": "dT", "magnitude": 10}
+  ],
+  "units": {"m": "kg", "cp": "J/(kg*K)", "dT": "K"},
+  "required_units": {"m": "kg", "cp": "J/(kg*K)", "dT": "K"}
+}

@@ -145,6 +145,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to YAML config (trusted; UI cannot override sandbox/routing)",
     )
+
+    from ai_lab.cli_benchmark import build_benchmark_parser
+    from ai_lab.cli_provider import build_provider_parser
+
+    build_benchmark_parser(sub)
+    build_provider_parser(sub)
     return parser
 
 
@@ -269,6 +275,21 @@ def main(argv: list[str] | None = None) -> int:
             return run_ui_cli(host=args.host, port=args.port, config_path=args.config)
         except Exception as exc:
             logger.error("UI server failed: %s", exc)
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+
+    if args.command == "benchmark":
+        from ai_lab.cli_benchmark import run_benchmark_cli
+
+        return run_benchmark_cli(args)
+
+    if args.command == "provider":
+        from ai_lab.cli_provider import run_provider_cli
+
+        try:
+            return run_provider_cli(args)
+        except Exception as exc:
+            logger.error("Provider command failed: %s", exc)
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
 

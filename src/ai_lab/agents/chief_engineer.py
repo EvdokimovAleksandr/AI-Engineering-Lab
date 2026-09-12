@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ai_lab.agents.base import AgentContext, BaseAgent, llm_json
+from ai_lab.agents.base import AgentContext, BaseAgent, coerce_str_list, llm_json
 from ai_lab.core.enums import AgentRole, DecisionStatus, EvidenceKind
 from ai_lab.core.models import (
     AgentResult,
@@ -45,7 +45,8 @@ class ChiefEngineerAgent(BaseAgent):
             system=self.system_prompt,
             user=(
                 f"Objective: {task.objective}\n\nProblem file:\n{problem}\n\n"
-                "Return JSON with keys: summary, understanding, unknowns, follow_up_roles."
+                "Return JSON with keys: summary (string), understanding (string), "
+                "unknowns (array of strings), follow_up_roles (array of role name strings)."
             ),
             schema_name="ChiefEngineerPlan",
         )
@@ -63,7 +64,7 @@ class ChiefEngineerAgent(BaseAgent):
             kind=EvidenceKind.INFERENCE,
             evidence="Chief Engineer problem framing",
             agent_id=self.role.value,
-            assumptions=list(payload.get("unknowns") or [])[:5],
+            assumptions=coerce_str_list(payload.get("unknowns"), limit=5),
             confidence=ConfidenceBreakdown(assumption_quality=0.4, source_quality=0.3),
             falsifiers=["Problem restatement rejected by human owner"],
         )
@@ -74,7 +75,7 @@ class ChiefEngineerAgent(BaseAgent):
             question="How should the lab approach this problem?",
             hypothesis=str(payload.get("summary") or ""),
             evidence=[claim.claim_id],
-            assumptions=list(payload.get("unknowns") or []),
+            assumptions=coerce_str_list(payload.get("unknowns")),
             agents_involved=[self.role.value],
             status=DecisionStatus.PROPOSED,
             next_action="Dispatch specialist agents",
@@ -121,7 +122,13 @@ class ChiefEngineerAgent(BaseAgent):
             )
             artifact_paths.append("reviews/synthesis_bundle.json")
 
-            if not synthesis_allowed(bundle):
+            if not synthesis_allowed(
+                bundle,
+                require_independent_review=bool(
+                    ctx.extra.get("require_independent_review", True)
+                ),
+                require_red_team=bool(ctx.extra.get("require_red_team", True)),
+            ):
                 raise RuntimeError(
                     "Final report gate blocked: missing verification and/or red-team reports"
                 )

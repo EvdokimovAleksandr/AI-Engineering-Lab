@@ -32,6 +32,10 @@ def graph_for_iteration(
 
     Does not invent a second iteration mechanism — only materializes the
     existing policy as TaskGraph vN (supersedes previous graph_id@version).
+
+    Dependencies / inputs that pointed at sliced-away earlier tasks are pruned
+    so the revised graph stays DAG-valid (artifacts from prior stages remain
+    on disk; we do not re-require those task ids).
     """
     if reentry not in _STAGE_ORDER:
         raise ValueError(f"Unsupported iteration re-entry state: {reentry}")
@@ -39,6 +43,7 @@ def graph_for_iteration(
     allowed = set(_STAGE_ORDER[start:])
     # Prefer tasks from the previous graph so custom plans can iterate too.
     source = previous.tasks or default_pipeline_tasks()
+    source_ids = {task.task_id for task in source}
     kept: list[TaskSpec] = []
     for task in source:
         stage = task.state_context
@@ -52,9 +57,27 @@ def graph_for_iteration(
             kept.append(task.model_copy(deep=True))
     if not kept:
         raise ValueError(f"No tasks remain for re-entry at {reentry.value}")
+
+    kept_ids = {task.task_id for task in kept}
+    pruned: list[TaskSpec] = []
+    for task in kept:
+        # Drop edges to tasks removed by the stage slice (e.g. calculation → understanding).
+        new_deps = [dep for dep in task.depends_on if dep in kept_ids]
+        new_inputs = [
+            item
+            for item in task.inputs
+            if item not in source_ids or item in kept_ids
+        ]
+        pruned.append(
+            task.model_copy(
+                update={"depends_on": new_deps, "inputs": new_inputs},
+                deep=True,
+            )
+        )
+
     return TaskGraph(
         graph_id=previous.graph_id,
-        tasks=kept,
+        tasks=pruned,
         version=previous.version + 1,
         supersedes=f"{previous.graph_id}@v{previous.version}",
         reason=reason,

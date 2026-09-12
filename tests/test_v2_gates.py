@@ -324,38 +324,6 @@ async def test_tool_output_marked_untrusted(tmp_path: Path) -> None:
 def test_cursor_provider_reasoning_only_ignores_project_cwd(tmp_path: Path, monkeypatch) -> None:
     """Cursor must not bind cwd to project root (FS escape past ToolRegistry)."""
     monkeypatch.setenv("CURSOR_API_KEY", "test-key-not-real")
-
-    class _FakeAgent:
-        @staticmethod
-        def prompt(prompt, options):
-            class R:
-                status = "ok"
-                result = '{"summary":"ok"}'
-                id = "x"
-
-            return R()
-
-    class _Opts:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    import ai_lab.llm.cursor_sdk as mod
-
-    monkeypatch.setattr(
-        mod,
-        "CursorSDKProvider",
-        CursorSDKProvider,
-    )
-    # Patch import inside __init__
-    import sys
-    import types
-
-    fake = types.ModuleType("cursor_sdk")
-    fake.Agent = _FakeAgent
-    fake.AgentOptions = lambda **kw: _Opts(**kw)
-    fake.LocalAgentOptions = lambda **kw: _Opts(**kw)
-    monkeypatch.setitem(sys.modules, "cursor_sdk", fake)
-
     project = tmp_path / "project"
     project.mkdir()
     provider = CursorSDKProvider(api_key="test-key-not-real", cwd=project, reasoning_only=True)

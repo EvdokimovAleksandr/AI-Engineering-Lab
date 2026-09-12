@@ -2,7 +2,7 @@
 
 Deterministic routing of existing `LLMProvider` backends. The router is **not** an agent: it does not run tools, write files, mutate `TaskGraph` / `RunBudget` / `CheckStatus`, or adjudicate.
 
-See also: [architecture.md](architecture.md), [architecture-v2.md](architecture-v2.md), [taskgraph-planner.md](taskgraph-planner.md), [engineering-simulation.md](engineering-simulation.md).
+See also: [providers.md](providers.md), [architecture.md](architecture.md), [architecture-v2.md](architecture-v2.md), [taskgraph-planner.md](taskgraph-planner.md), [engineering-simulation.md](engineering-simulation.md).
 
 The UI and `SimulationSpec` cannot override `RoutingPolicy`. Solver selection is a trusted registry, not a routed LLM model.
 

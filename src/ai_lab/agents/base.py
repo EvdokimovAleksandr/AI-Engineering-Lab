@@ -14,6 +14,44 @@ from ai_lab.observability.tracing import RunEventSink
 from ai_lab.tools.registry import ToolRegistry
 
 
+def coerce_str_list(values: Any, *, limit: int | None = None) -> list[str]:
+    """Normalize LLM list fields to list[str].
+
+    Real providers often return assumption/unknown objects like
+    ``{"id": "...", "statement": "..."}``; Claim/DecisionRecord require strings.
+    """
+    if values is None:
+        return []
+    if isinstance(values, str):
+        text = values.strip()
+        return [text] if text else []
+    if not isinstance(values, list):
+        text = str(values).strip()
+        return [text] if text else []
+
+    out: list[str] = []
+    for item in values:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            text = str(
+                item.get("statement")
+                or item.get("text")
+                or item.get("assumption")
+                or item.get("description")
+                or item.get("unknown")
+                or item.get("id")
+                or ""
+            ).strip()
+        else:
+            text = str(item).strip()
+        if text:
+            out.append(text)
+        if limit is not None and len(out) >= limit:
+            break
+    return out
+
+
 @dataclass
 class AgentContext:
     """Runtime dependencies injected into every agent."""

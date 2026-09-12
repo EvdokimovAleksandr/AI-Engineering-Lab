@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from ai_lab.agents.base import AgentContext, BaseAgent, llm_json
+from ai_lab.agents.base import AgentContext, BaseAgent, coerce_str_list, llm_json
+from ai_lab.checks.math_check import normalize_math_check_payload
 from ai_lab.core.enums import AgentRole, EvidenceKind
 from ai_lab.core.models import AgentResult, Claim, ComputationArtifact, ConfidenceBreakdown, TaskSpec
 from ai_lab.observability.logger import get_logger
@@ -71,17 +72,19 @@ class SimulationAgent(BaseAgent):
         claims: list[Claim] = []
         for item in payload.get("claims") or []:
             math_check = item.get("math_check")
-            if math_check and code and "code" not in math_check:
+            if math_check and code and isinstance(math_check, dict) and "code" not in math_check:
                 # Attach sandbox recompute code for deterministic layer
                 math_check = {**math_check, "code": code}
+            if math_check is not None:
+                math_check = normalize_math_check_payload(math_check)
             claim = Claim(
                 statement=str(item.get("statement") or ""),
                 kind=EvidenceKind.CALCULATION
                 if exec_result.get("returncode") == 0
                 else EvidenceKind.OPINION,
                 evidence=f"computation_artifact={artifact.artifact_id}",
-                assumptions=list(item.get("assumptions") or []),
-                falsifiers=list(item.get("falsifiers") or []),
+                assumptions=coerce_str_list(item.get("assumptions")),
+                falsifiers=coerce_str_list(item.get("falsifiers")),
                 conditions={"sandbox_returncode": exec_result.get("returncode")},
                 agent_id=self.role.value,
                 math_check=math_check,

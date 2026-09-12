@@ -3,6 +3,9 @@
 STAGE_ROLES remains a stage→role table. This module compiles the default
 pipeline into data (a TaskGraph), which LabRuntime executes only after
 validation. Verification ∥ RedTeam are siblings, never a chain.
+
+Workflow profiles (SIMPLE/STANDARD/COMPLEX/RESEARCH) are overlays from
+task_routing.profiles — not a second orchestration engine.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from ai_lab.core.enums import AgentRole, ProjectState, TaskKind
 from ai_lab.core.models import BudgetSlice, TaskGraph, TaskGraphProposal, TaskSpec
 from ai_lab.planner.context import ProblemContext
 from ai_lab.planner.schemas import INDEPENDENT_REVIEW_GROUP
+from ai_lab.task_routing.profiles import KNOWN_WORKFLOW_PIPELINES
 
 
 def _slice_agent() -> BudgetSlice:
@@ -275,24 +279,54 @@ def tasks_to_proposal_dicts(tasks: list[TaskSpec]) -> list[dict]:
     return rows
 
 
+_GRAPH_IDS = {
+    "default": "static_pipeline",
+    "uniaxial_tension": "uniaxial_tension_pipeline",
+    "simple": "simple_pipeline",
+    "standard": "standard_pipeline",
+    "complex": "complex_pipeline",
+    "research": "research_pipeline",
+}
+
+
 class StaticPlanner:
-    """Regression / demo planner: always the same pipeline graph."""
+    """Regression / demo planner: named pipeline graph (profile or special)."""
 
     name = "static"
 
     def __init__(self, *, graph_id: str | None = None, pipeline: str = "default") -> None:
         kind = (pipeline or "default").strip().lower()
-        if kind not in {"default", "uniaxial_tension"}:
-            raise ValueError(f"Unknown static pipeline {pipeline!r} (expected default|uniaxial_tension)")
+        if kind not in KNOWN_WORKFLOW_PIPELINES:
+            raise ValueError(
+                f"Unknown static pipeline {pipeline!r} "
+                f"(expected {sorted(KNOWN_WORKFLOW_PIPELINES)})"
+            )
         self.pipeline = kind
-        self.graph_id = graph_id or (
-            "uniaxial_tension_pipeline" if kind == "uniaxial_tension" else "static_pipeline"
-        )
+        self.graph_id = graph_id or _GRAPH_IDS[kind]
 
     def _tasks(self) -> list[TaskSpec]:
+        # Lazy imports keep planner.static importable without pulling profile↔planner cycles early.
         if self.pipeline == "uniaxial_tension":
             return tensile_pipeline_tasks()
-        return default_pipeline_tasks()
+        if self.pipeline == "default":
+            return default_pipeline_tasks()
+        from ai_lab.task_routing.enums import WorkflowProfile
+        from ai_lab.task_routing.profiles import (
+            complex_pipeline_tasks,
+            pipeline_tasks_for_profile,
+            simple_pipeline_tasks,
+            standard_pipeline_tasks,
+        )
+
+        if self.pipeline == "simple":
+            return simple_pipeline_tasks()
+        if self.pipeline == "standard":
+            return standard_pipeline_tasks()
+        if self.pipeline == "complex":
+            return complex_pipeline_tasks()
+        if self.pipeline == "research":
+            return pipeline_tasks_for_profile(WorkflowProfile.RESEARCH)
+        raise ValueError(f"Unhandled static pipeline {self.pipeline!r}")
 
     async def propose(self, context: ProblemContext) -> TaskGraphProposal:
         tasks = self._tasks()

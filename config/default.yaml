@@ -1,4 +1,5 @@
 # AI Engineering Lab — default configuration
+# Top-level default backend. Agents never import vendor SDKs; they use LLMProvider via the router.
 provider: mock  # mock | cursor_sdk | replay
 
 # Per-role model IDs (identifiers only — not commercial lock-in)
@@ -12,6 +13,13 @@ models:
 
 # V2.4a: deterministic role → provider/model. Omitted fields inherit `provider` + `models`.
 # CI/demo default keeps every role on the top-level provider (mock) so tests stay offline.
+#
+# Future multi-backend example (no Agent code changes — register factories only):
+#   routing:
+#     roles:
+#       chief_engineer: { provider: cursor_sdk, model: composer-2.5 }
+#       theorist:       { provider: openai,     model: gpt-5 }      # when openai factory exists
+#       verification:   { provider: anthropic,  model: claude-… }   # when anthropic factory exists
 routing:
   version: "1"
   roles:
@@ -141,8 +149,26 @@ research:
 
 # V2.5 trusted simulation policy. LLM/UI cannot add solvers or raise limits.
 simulation:
-  pipeline: default  # default | uniaxial_tension
+  pipeline: default  # default | uniaxial_tension | (overridden by TaskRouter profiles)
   allowed_solvers:
     - uniaxial_tension
   require_explicit_assumptions: true
+
+# Task Router: classify task → deterministic policy → workflow profile.
+# Distinct from `routing:` (LLM model selection). LLM cannot lower policy floors.
+task_routing:
+  version: "1"
+  enabled: true
+  classifier: heuristic  # heuristic only for now; llm would propose, not decide
+  thresholds:
+    complexity_simple_max: 2
+    complexity_standard_max: 5
+    complexity_complex_max: 8
+    risk_low_max: 2
+    risk_medium_max: 5
+    risk_high_max: 8
+    uncertainty_low_max: 2
+    uncertainty_medium_max: 5
+    uncertainty_high_max: 8
+  # Omit `rules` to use built-in defaults (high risk → enhance, all-low → SIMPLE, …).
 

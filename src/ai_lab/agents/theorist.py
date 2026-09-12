@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ai_lab.agents.base import AgentContext, BaseAgent, llm_json
+from ai_lab.agents.base import AgentContext, BaseAgent, coerce_str_list, llm_json
 from ai_lab.core.enums import AgentRole, EvidenceKind
 from ai_lab.core.models import AgentResult, Claim, ConfidenceBreakdown, Hypothesis, TaskSpec
 
@@ -37,8 +37,8 @@ class TheoristAgent(BaseAgent):
                 if item.get("kind") in EvidenceKind._value2member_map_
                 else EvidenceKind.INFERENCE,
                 evidence=item.get("evidence"),
-                assumptions=list(item.get("assumptions") or []),
-                falsifiers=list(item.get("falsifiers") or []),
+                assumptions=coerce_str_list(item.get("assumptions")),
+                falsifiers=coerce_str_list(item.get("falsifiers")),
                 agent_id=self.role.value,
                 confidence=ConfidenceBreakdown(assumption_quality=0.5, source_quality=0.3),
             )
@@ -50,8 +50,8 @@ class TheoristAgent(BaseAgent):
             hyp = Hypothesis(
                 statement=str(item.get("statement") or ""),
                 prediction=str(item.get("prediction") or ""),
-                falsification_criteria=list(item.get("falsification_criteria") or []),
-                assumptions=list(item.get("assumptions") or []),
+                falsification_criteria=coerce_str_list(item.get("falsification_criteria")),
+                assumptions=coerce_str_list(item.get("assumptions")),
                 agent_id=self.role.value,
             )
             hyp_path = f"hypotheses/{hyp.hypothesis_id}.json"

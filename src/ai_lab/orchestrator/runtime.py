@@ -65,6 +65,10 @@ from ai_lab.planner.iteration import graph_for_iteration
 from ai_lab.planner.pipeline import plan_and_validate
 from ai_lab.planner.schemas import KNOWN_TOOL_NAMES, REVIEW_ROLES
 from ai_lab.planner.validator import TaskGraphValidationContext, validate_task_graph
+from ai_lab.task_routing.models import RoutingDecision
+from ai_lab.task_routing.policy import task_routing_policy_from_config
+from ai_lab.task_routing.profiles import profile_to_pipeline_name
+from ai_lab.task_routing.router import TaskRouter
 from ai_lab.tools.factory import build_tool_registry
 from ai_lab.workflows.engine import WorkflowEngine
 from ai_lab.workflows.example_pipeline import STAGE_ROLES
@@ -158,6 +162,8 @@ class LabRuntime:
         self._task_statuses: dict[str, TaskStatus] = {}
         self._executions: list[TaskExecutionRecord] = []
         self._task_graph_node_id: str | None = None
+        self._routing_decision: RoutingDecision | None = None
+        self._task_routing_policy = task_routing_policy_from_config(config)
 
     def _ctx(self) -> AgentContext:
         return AgentContext(
@@ -178,6 +184,21 @@ class LabRuntime:
                 "verification_report": self._last_verification,
                 "red_team_report": self._last_red_team,
                 "independence_assessment": self._independence_assessment,
+                "require_independent_review": (
+                    self._routing_decision.require_independent_review
+                    if self._routing_decision is not None
+                    else True
+                ),
+                "require_red_team": (
+                    self._routing_decision.require_red_team
+                    if self._routing_decision is not None
+                    else True
+                ),
+                "workflow_profile": (
+                    self._routing_decision.final_workflow.value
+                    if self._routing_decision is not None
+                    else None
+                ),
             },
         )
 
@@ -283,9 +304,72 @@ class LabRuntime:
                 run_id=self.run_id,
             )
 
+    def _resolve_pipeline_for_planner(self) -> str | None:
+        """Pick TaskGraph template. Explicit uniaxial_tension config wins over router."""
+        configured = str((self.config.simulation or {}).get("pipeline") or "default").strip().lower()
+        if configured == "uniaxial_tension":
+            return None  # factory reads simulation.pipeline
+        if not self._task_routing_policy.enabled:
+            return None
+        if self._routing_decision is None:
+            return None
+        return profile_to_pipeline_name(self._routing_decision.final_workflow)
+
+    def _route_task(self) -> RoutingDecision | None:
+        """Run TaskRouter before planning. Returns None when routing is disabled."""
+        if not self._task_routing_policy.enabled:
+            return None
+        # Trusted simulation override: do not re-route away from tensile benchmark.
+        configured = str((self.config.simulation or {}).get("pipeline") or "default").strip().lower()
+        if configured == "uniaxial_tension":
+            return None
+        router = TaskRouter(self._task_routing_policy)
+        # Route on the posed problem, not scaffold requirements/assumptions —
+        # those can pollute classification when UI overrides problem.md.
+        full_ctx = self._problem_context()
+        route_ctx = ProblemContext(
+            project_id=full_ctx.project_id,
+            run_id=full_ctx.run_id,
+            problem_text=full_ctx.problem_text,
+            requirements_text="",
+            assumptions_text="",
+            budget=full_ctx.budget,
+            allowed_tools=full_ctx.allowed_tools,
+            extra_data={},
+        )
+        decision = router.route(route_ctx)
+        self._routing_decision = decision
+        self.run_store.save_planner_json("task_routing.json", decision.public_dump())
+        try:
+            manifest = self.run_store.load_manifest()
+            manifest.task_routing_decision = decision.public_dump()
+            manifest.workflow_profile = decision.final_workflow.value
+            self.run_store.save_manifest(manifest)
+        except FileNotFoundError:
+            # Manifest is created at run() start; plan_project may route before that.
+            logger.info("Task routing saved to planner artifact (manifest not yet written)")
+        if decision.require_hitl:
+            # Policy-mandated HITL before execution — same interrupt path as plan HITL.
+            raise _HitlInterrupt(
+                HitlRequest(
+                    reason="TaskRoutingPolicy requires human review before execution",
+                    options=["approve_routing", "reject_routing"],
+                    context={
+                        "workflow": decision.final_workflow.value,
+                        "evidence": [e.value for e in decision.final_evidence],
+                        "risk": decision.classification.risk,
+                    },
+                )
+            )
+        return decision
+
     async def _prepare_task_graph(self) -> TaskGraph:
-        """Planner proposes; only a validated DAG is stored and later executed."""
-        planner = create_planner(self.config, llm=self.llm)
+        """Router (optional) → planner proposes; only a validated DAG is executed."""
+        self._route_task()
+        pipeline_override = self._resolve_pipeline_for_planner()
+        planner = create_planner(
+            self.config, llm=self.llm, pipeline_override=pipeline_override
+        )
         context = self._problem_context()
         vctx = TaskGraphValidationContext(
             budget=self.budget,
@@ -822,10 +906,25 @@ class LabRuntime:
     def _finish_adjudication(self) -> AdjudicationStatus:
         if self._last_check_report is None:
             raise RuntimeError("Adjudication requires a deterministic check report")
+        require_review = True
+        require_rt = True
+        if self._routing_decision is not None:
+            require_review = self._routing_decision.require_independent_review
+            require_rt = self._routing_decision.require_red_team
+        elif self._task_graph is not None:
+            # Fallback: read flags from adjudication task metadata (profile graphs).
+            for task in self._task_graph.tasks:
+                if task.task_kind == TaskKind.ADJUDICATION and task.metadata:
+                    if "require_independent_review" in task.metadata:
+                        require_review = bool(task.metadata["require_independent_review"])
+                    if "require_red_team" in task.metadata:
+                        require_rt = bool(task.metadata["require_red_team"])
         adj = adjudicate(
             check_report=self._last_check_report,
             verification=self._last_verification,
             red_team=self._last_red_team,
+            require_independent_review=require_review,
+            require_red_team=require_rt,
         )
         adj.routing_policy_version = self.routing_policy.version
         adj.model_routing = {

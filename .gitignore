@@ -12,6 +12,9 @@ build/
 *.log
 .runs/
 
+# Benchmark isolated workspaces (copies of scaffolds + runs)
+benchmarks/.workspace/
+
 # Runtime artifacts from lab runs (keep directory placeholders)
 projects/*/project_state.json
 projects/*/research/**
