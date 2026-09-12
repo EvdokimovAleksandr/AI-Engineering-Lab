@@ -273,16 +273,44 @@ class CursorSDKProvider:
             run_id = getattr(result, "id", None)
             status = str(getattr(result, "status", "") or "").lower()
             if status == "error":
-                logger.error(
-                    "Cursor SDK run failed: provider=%s model=%s run_id=%s duration_ms=%.1f",
+                # SDK finished the run but marked it failed (network blip, model abort).
+                # Surface any vendor error text and retry like other transient failures.
+                err_detail = (
+                    getattr(result, "error", None)
+                    or getattr(result, "result", None)
+                    or getattr(result, "text", None)
+                    or ""
+                )
+                err_s = str(err_detail).strip()[:400]
+                msg = f"Cursor SDK run failed: run_id={run_id} model={model}"
+                if err_s:
+                    msg = f"{msg} detail={err_s}"
+                last_error = ProviderUnavailable(msg)
+                if attempt >= self.max_transient_attempts:
+                    logger.error(
+                        "Cursor SDK run failed: provider=%s model=%s run_id=%s "
+                        "duration_ms=%.1f detail=%s",
+                        self.name,
+                        model,
+                        run_id,
+                        duration_ms,
+                        err_s or "(none)",
+                    )
+                    raise last_error
+                delay = _BASE_BACKOFF_S * (2 ** (attempt - 1))
+                logger.warning(
+                    "Cursor SDK status=error (attempt %s/%s, provider=%s model=%s "
+                    "run_id=%s): %s; retry in %.2fs",
+                    attempt,
+                    self.max_transient_attempts,
                     self.name,
                     model,
                     run_id,
-                    duration_ms,
+                    err_s or msg,
+                    delay,
                 )
-                raise ProviderUnavailable(
-                    f"Cursor SDK run failed: run_id={run_id} model={model}"
-                )
+                await asyncio.sleep(delay)
+                continue
 
             content = getattr(result, "result", None) or getattr(result, "text", None) or str(result)
             if not isinstance(content, str):

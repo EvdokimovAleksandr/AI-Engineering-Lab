@@ -46,18 +46,37 @@ class ChiefEngineerAgent(BaseAgent):
             user=(
                 f"Objective: {task.objective}\n\nProblem file:\n{problem}\n\n"
                 "Return JSON with keys: summary (string), understanding (string), "
-                "unknowns (array of strings), follow_up_roles (array of role name strings)."
+                "unknowns (array of strings), follow_up_roles (array of role name strings), "
+                "required_outputs (array of output names the quantitative answer must produce), "
+                "expected_dimensions (object mapping each required_output name → unit string, "
+                "e.g. power→W). required_outputs must reflect the problem, not a substitute task."
             ),
             schema_name="ChiefEngineerPlan",
         )
 
         path = "reviews/chief_understanding.json"
-        await ctx.tools.call(
-            "artifacts.save",
-            allowed=ctx.allowed_tools_for(self.role, task),
-            path=path,
-            data=payload,
-        )
+        # Understanding lock is immutable for the run: synthesis must not overwrite it.
+        if not is_synthesis:
+            await ctx.tools.call(
+                "artifacts.save",
+                allowed=ctx.allowed_tools_for(self.role, task),
+                path=path,
+                data=payload,
+            )
+            # Run-scoped snapshot so adjudication reads the locked policy, not later prose.
+            if ctx.run_store is not None:
+                ctx.run_store.save_review_json("chief_understanding.json", payload)
+        else:
+            # Synthesis notes are separate — never become VerificationPolicy.
+            await ctx.tools.call(
+                "artifacts.save",
+                allowed=ctx.allowed_tools_for(self.role, task),
+                path="reviews/chief_synthesis_notes.json",
+                data=payload,
+            )
+            if ctx.run_store is not None:
+                ctx.run_store.save_review_json("chief_synthesis_notes.json", payload)
+            path = "reviews/chief_synthesis_notes.json"
 
         claim = Claim(
             statement=str(payload.get("understanding") or payload.get("summary") or ""),
@@ -113,6 +132,8 @@ class ChiefEngineerAgent(BaseAgent):
                 red_team=red_team,
                 decisions=decisions,
                 adjudication=adjudication,
+                check_report=ctx.extra.get("check_report"),
+                narrative=str(payload.get("summary") or ""),
             )
             await ctx.tools.call(
                 "artifacts.save",
@@ -121,6 +142,11 @@ class ChiefEngineerAgent(BaseAgent):
                 data=bundle.model_dump(mode="json"),
             )
             artifact_paths.append("reviews/synthesis_bundle.json")
+            # Run-scoped copy for benchmark evaluate / manifest provenance.
+            if ctx.run_store is not None:
+                ctx.run_store.save_review_json(
+                    "synthesis_bundle.json", bundle.model_dump(mode="json")
+                )
 
             if not synthesis_allowed(
                 bundle,

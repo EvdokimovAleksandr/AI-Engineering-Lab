@@ -16,11 +16,14 @@
 2. Deterministic `validate_task_graph` (DAG, roles, schemas, budget, independence, optional routing)
 3. Ready-set execution (fan-out / fan-in); each agent call goes through `LLMRouter` + `RoutingPolicy`
 4. На review-узлах: `DeterministicCheckReport` → frozen `ReviewBundle` → **Verification ∥ Red Team** → `Adjudication`
-5. PASS → synthesis | иначе → `IterationPolicy` (graph revision vN, не второй iteration engine)
+5. Evidence completeness (V2.6): CalculationSpec + relevant ComputationArtifact + non-empty required checks
+6. PASS → grounded synthesis | иначе → honest gated report (SIMPLE) или `IterationPolicy` (graph revision vN)
+
+`COMPLETED` означает только техническое завершение; `engineering_outcome` / adjudication — инженерный итог.
 
 `STAGE_ROLES` — stage→roles metadata / источник `StaticPlanner`, **не** execution dependency graph.
 
-Подробности: [taskgraph-planner.md](taskgraph-planner.md). Симуляция: [engineering-simulation.md](engineering-simulation.md). UI: [ui.md](ui.md).
+Подробности: [taskgraph-planner.md](taskgraph-planner.md), [benchmark-integrity.md](benchmark-integrity.md). Симуляция: [engineering-simulation.md](engineering-simulation.md). UI: [ui.md](ui.md).
 
 ```text
                     User

@@ -70,7 +70,11 @@ async def test_benchmark_run_simple_heater_is_simple_and_isolated(tmp_path: Path
     assert report.observed_workflow == "SIMPLE"
     wf = next(c for c in report.categories if c.category == "workflow_selection")
     assert wf.verdict == EvalVerdict.PASS
-    assert report.overall in {EvalVerdict.PASS, EvalVerdict.PARTIAL}
+    # V2.6: default mock fiber calc is not heater-relevant → engineering may FAIL,
+    # but technical pipeline and routing must still succeed.
+    tech = next(c for c in report.categories if c.category == "technical_success")
+    assert tech.verdict == EvalVerdict.PASS
+    assert report.overall in {EvalVerdict.PASS, EvalVerdict.PARTIAL, EvalVerdict.FAIL}
 
 
 @pytest.mark.asyncio

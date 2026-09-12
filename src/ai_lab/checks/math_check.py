@@ -131,6 +131,7 @@ def math_result_from_verification(vr: VerificationResult) -> MathCheckResult:
             "status": vr.status.value,
             "result_id": vr.result_id,
             "kind": "verification_spec",
+            "claim_id": vr.claim_id,
         },
         status=vr.status,
         verification_result=vr,

@@ -39,7 +39,13 @@ from ai_lab.sandbox.models import (
 )
 from ai_lab.sandbox.policy import bind_spec_to_policy
 from ai_lab.sandbox.supervise import close_subprocess_streams, kill_local_process, supervise_process, wait_killed
-from ai_lab.sandbox.windows_job import WindowsJob, pid_is_alive
+from ai_lab.sandbox.windows_job import (
+    WindowsJob,
+    _windows_child_pids,
+    kill_process_tree,
+    pid_is_alive,
+    terminate_pid,
+)
 from ai_lab.sandbox.workspace import prepare_workspace, write_workspace_files
 
 logger = get_logger(__name__)
@@ -251,10 +257,48 @@ async def _ensure_dead(
         if proc.returncode is None:
             await proc.wait()
         return
+    # Snapshot descendants *before* TerminateJobObject: on Windows the grandchild
+    # may survive the job kill (breakaway / nested host job), and after the parent
+    # dies Toolhelp no longer links orphans to the dead root pid.
+    known_children: list[int] = []
+    if sys.platform == "win32" and proc.pid:
+        known_children = _windows_child_pids(int(proc.pid))
     if job is not None and job.assigned:
         job.terminate(1)
+    for child_pid in known_children:
+        if pid_is_alive(child_pid):
+            logger.error(
+                "Sandbox descendant still alive after Job terminate; killing pid=%s",
+                child_pid,
+            )
+            terminate_pid(child_pid)
+    if proc.pid:
+        kill_process_tree(proc.pid)
     kill_local_process(proc)
     await wait_killed(proc)
+    # Settle: process-table lag after TerminateProcess.
+    if proc.pid:
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline and (
+            pid_is_alive(proc.pid) or any(pid_is_alive(c) for c in known_children)
+        ):
+            for child_pid in known_children:
+                if pid_is_alive(child_pid):
+                    terminate_pid(child_pid)
+            if pid_is_alive(proc.pid):
+                kill_local_process(proc)
+            await asyncio.sleep(0.05)
+        if pid_is_alive(proc.pid):
+            logger.error(
+                "Sandbox parent still alive after terminate+tree-kill+poll: pid=%s",
+                proc.pid,
+            )
+        still = [c for c in known_children if pid_is_alive(c)]
+        if still:
+            logger.error(
+                "Sandbox descendants still alive after kill attempts: %s",
+                still,
+            )
 
 
 def _status_from(

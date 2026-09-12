@@ -15,6 +15,8 @@ Problem
 
 `STAGE_ROLES` remains a **stage → roles table**. It is not the execution DAG. `StaticPlanner` compiles the default pipeline into a `TaskGraph`. `LabRuntime` loads that graph, validates it, then walks ready tasks.
 
+V2.6: calculation tasks bind to a `CalculationSpec`; empty deterministic checks cannot PASS for quantitative engineering. See [benchmark-integrity.md](benchmark-integrity.md).
+
 ## Why
 
 The MVP scheduler was a hidden FSM: `STAGE_ROLES[state]` plus `advance()`. Chief `follow_up_tasks` were ignored. A planner that *ran* agents would give the model execution authority.

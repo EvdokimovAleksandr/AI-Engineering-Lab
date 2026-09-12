@@ -20,15 +20,17 @@ Problem → TaskRouter → workflow profile → Planner → validated TaskGraph
 - Validated `TaskGraph` (StaticPlanner / LLM proposal); `STAGE_ROLES` — compatibility table, не execution DAG
 - Parallel independent review: Verification ∥ Red Team + Adjudication
 - Deterministic MathCheck + Pint `DeterministicVerifier`; LLM cannot override critical FAIL
-- SynthesisBundle → gated `final_report.md`
+- **V2.6** CalculationSpec + relevance + evidence completeness; empty verification ≠ PASS; grounded synthesis
+- SynthesisBundle → gated `final_report.md` (narrative ≠ accepted quantitative claims)
 - RunManifest + immutable computation artifacts under `.runs/<run_id>/`
-- RunBudget (agent/tool/token/time/cost caps)
+- RunBudget (agent/tool/token/time/cost caps); unknown token usage ≠ zero
 - Evidence graph (JSON), claim versioning, ReviewBundle (blind)
 - Tools: Python compute sandbox (`python.execute` → LocalSubprocessSandbox или optional DockerSandbox), files, artifacts, research pipeline (EXTERNAL taint; mock:// = STUB)
 - LLM: `mock` | `cursor_sdk` (reasoning-only cwd) | `replay`; **LLMRouter** selects per-role `ModelConfig`
 - Scaffold: `projects/spider_silk_industrial/`
 - Engineering simulation (V2.5): `SimulationSpec` + `UniaxialTensionSolver` + Pint; synthetic tensile fixture is STUB, not FACT
 - Local task UI: `python -m ai_lab ui` → LabRuntime (no second orchestrator)
+- **V2.7** UI-first laboratory: projects/runs API, async runs, SSE event stream, structured result report (`python -m ai_lab ui --demo`)
 
 ## Knowledge (V2.1)
 
@@ -45,6 +47,9 @@ pip install -e ".[dev]"
 
 # Офлайн demo (без API-ключей)
 python -m ai_lab run projects/spider_silk_industrial --provider mock
+
+# Laboratory UI (browser)
+python -m ai_lab ui --demo
 
 # Тесты
 pytest
@@ -93,7 +98,7 @@ python -m ai_lab research "<query>" [--research-backend mock|replay|web] [--proj
 python -m ai_lab routing [--provider mock]
 python -m ai_lab provider test [--provider mock|cursor_sdk]
 python -m ai_lab sandbox
-python -m ai_lab ui
+python -m ai_lab ui [--demo]
 python -m ai_lab benchmark list
 python -m ai_lab benchmark run <simple_heater|shaft_design|spider_silk_review> [--provider mock|cursor_sdk]
 python -m ai_lab benchmark evaluate <id> <run_id>

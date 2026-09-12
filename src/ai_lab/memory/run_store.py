@@ -162,10 +162,28 @@ class RunStore:
     def load_manifest(self) -> RunManifest:
         return RunManifest.model_validate(self.project.read_json(self.rel("manifest.json")))
 
-    def finish_manifest(self, *, final_state: str) -> RunManifest:
+    def finish_manifest(
+        self,
+        *,
+        final_state: str,
+        budget: RunBudget | None = None,
+        engineering_outcome: str | None = None,
+        calculation_spec_ids: list[str] | None = None,
+    ) -> RunManifest:
+        """Persist end-of-run fields including live budget counters.
+
+        Budget must be passed from LabRuntime — load_manifest alone would keep
+        the start-of-run snapshot (tokens_used=0) and lose real LLM usage.
+        """
         manifest = self.load_manifest()
         manifest.finished_at = datetime.now(timezone.utc)
         manifest.final_state = final_state
+        if budget is not None:
+            manifest.budget = budget
+        if engineering_outcome is not None:
+            manifest.engineering_outcome = engineering_outcome
+        if calculation_spec_ids is not None:
+            manifest.calculation_spec_ids = list(calculation_spec_ids)
         self.save_manifest(manifest)
         return manifest
 
@@ -178,17 +196,81 @@ class RunStore:
         self.project.write_json(rel, artifact.model_dump(mode="json"))
         return rel
 
+    def attach_computation_contract(
+        self,
+        artifact_id: str,
+        *,
+        task_id: str | None = None,
+        calculation_spec_id: str | None = None,
+        objective: str | None = None,
+        declared_outputs: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        claim_ids: list[str] | None = None,
+        output_claim_ids: list[str] | None = None,
+        kind: str | None = None,
+    ) -> str:
+        """Sidecar binding for CalculationSpec — does not mutate immutable artifact JSON.
+
+        python.execute saves the artifact before the agent can attach contract fields;
+        this sidecar is merged on load so relevance validation sees declared_outputs.
+        """
+        rel = self.rel("computations", f"{artifact_id}.contract.json")
+        payload = {
+            "artifact_id": artifact_id,
+            "task_id": task_id,
+            "calculation_spec_id": calculation_spec_id,
+            "objective": objective,
+            "declared_outputs": declared_outputs or {},
+            "metadata": metadata or {},
+            "claim_ids": claim_ids or [],
+            "output_claim_ids": output_claim_ids or [],
+            "kind": kind,
+        }
+        self.project.write_json(rel, payload)
+        return rel
+
     def list_computations(self) -> list[ComputationArtifact]:
         folder = self.project.root / self.rel_root / "computations"
         if not folder.is_dir():
             return []
         out: list[ComputationArtifact] = []
         for path in sorted(folder.glob("*.json")):
-            out.append(ComputationArtifact.model_validate(json.loads(path.read_text(encoding="utf-8"))))
+            if path.name.endswith(".contract.json"):
+                continue
+            art = ComputationArtifact.model_validate(json.loads(path.read_text(encoding="utf-8")))
+            contract_path = path.with_name(f"{art.artifact_id}.contract.json")
+            if contract_path.is_file():
+                contract = json.loads(contract_path.read_text(encoding="utf-8"))
+                # Merge contract binding without rewriting immutable core fields.
+                updates: dict[str, Any] = {}
+                for key in (
+                    "task_id",
+                    "calculation_spec_id",
+                    "objective",
+                    "declared_outputs",
+                    "claim_ids",
+                    "output_claim_ids",
+                ):
+                    if contract.get(key) not in (None, {}, []):
+                        updates[key] = contract[key]
+                if contract.get("kind"):
+                    updates["kind"] = contract["kind"]
+                if contract.get("metadata"):
+                    updates["metadata"] = {**art.metadata, **contract["metadata"]}
+                if updates:
+                    art = art.model_copy(update=updates)
+            out.append(art)
         return out
 
     def save_review_json(self, name: str, data: Any) -> str:
         return self.project.write_json(self.rel("reviews", name), data)
+
+    def load_review_json(self, name: str) -> Any | None:
+        """Load a run-scoped review JSON, or None if missing."""
+        path = self.project.root / self.rel("reviews", name)
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def save_planner_json(self, name: str, data: Any) -> str:
         """Planner artifacts live only under this run's directory."""

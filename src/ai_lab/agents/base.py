@@ -126,9 +126,11 @@ async def llm_json(
     else:
         response = await ctx.llm.complete(request)
     ctx.extra["last_llm_routing"] = getattr(response, "routing", None) or {}
-    if ctx.budget is not None and response.usage:
-        tokens = int(response.usage.get("total_tokens") or 0)
-        ctx.budget.tokens_used += tokens
+    if ctx.budget is not None:
+        from ai_lab.orchestrator.budget import record_llm_usage
+
+        # Register usage at completion time — never coerce missing usage to 0.
+        record_llm_usage(ctx.budget, response.usage if response.usage else None)
     if response.parsed is None:
         raise RuntimeError(f"LLM provider {response.provider} returned no parsed JSON")
     return response.parsed

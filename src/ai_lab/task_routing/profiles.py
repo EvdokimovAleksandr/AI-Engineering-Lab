@@ -73,6 +73,9 @@ def simple_pipeline_tasks() -> list[TaskSpec]:
             metadata={
                 "workflow_profile": WorkflowProfile.SIMPLE.value,
                 "require_independent_review": False,
+                # Deterministic verification is mandatory for quantitative SIMPLE tasks.
+                "require_verification": True,
+                "require_calculation": True,
             },
         ),
         TaskSpec(

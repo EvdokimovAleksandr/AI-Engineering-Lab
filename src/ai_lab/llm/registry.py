@@ -31,11 +31,13 @@ def _make_mock(
     *,
     force_verification_fail: bool = False,
     verification_status_override: str | None = None,
+    simulation_fixture: str | None = None,
     **_: Any,
 ) -> MockProvider:
     return MockProvider(
         force_verification_fail=force_verification_fail,
         verification_status_override=verification_status_override,
+        simulation_fixture=simulation_fixture,
     )
 
 

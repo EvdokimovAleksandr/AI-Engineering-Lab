@@ -141,6 +141,9 @@ async def test_timeout_kills_process(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_timeout_kills_grandchild_when_job_attached(tmp_path: Path) -> None:
+    import asyncio
+    import time
+
     sandbox, parent = _sandbox(tmp_path, timeout_s=1.5, max_processes=8)
     spec = ComputeSpec(
         code=(
@@ -162,7 +165,14 @@ async def test_timeout_kills_grandchild_when_job_attached(tmp_path: Path) -> Non
             child_pid = int(line.split()[1])
     if result.security_metadata.get("job_object_attached"):
         assert child_pid is not None
-        assert not pid_is_alive(child_pid)
+        # Process-table lag after TerminateJobObject — poll, do not skip the guarantee.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and pid_is_alive(child_pid):
+            await asyncio.sleep(0.05)
+        assert not pid_is_alive(child_pid), (
+            f"grandchild pid={child_pid} still alive after job terminate "
+            "(security guarantee not met)"
+        )
     else:
         assert result.enforcement["process_tree_kill"] != EnforcementLevel.HARD.value
 

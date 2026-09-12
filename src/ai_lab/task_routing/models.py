@@ -117,6 +117,9 @@ class RoutingDecision(BaseModel):
     require_hitl: bool = False
     require_independent_review: bool = True
     require_red_team: bool = True
+    # V2.6: quantitative engineering always needs calculation + deterministic checks.
+    require_calculation: bool = False
+    require_verification: bool = False
     policy_overrides: list[PolicyOverride] = Field(default_factory=list)
     policy_version: str = "1"
     classifier_id: str = "heuristic"

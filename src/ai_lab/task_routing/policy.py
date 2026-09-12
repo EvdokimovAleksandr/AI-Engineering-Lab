@@ -193,6 +193,21 @@ class TaskRoutingPolicy(BaseModel):
         if final_wf == WorkflowProfile.SIMPLE and not require_independent_review:
             require_red_team = False
 
+        # V2.6: quantitative / deterministic engineering always requires
+        # calculation + deterministic verification (empty checks ≠ PASS).
+        det_evidence = {
+            EvidenceRequirement.DETERMINISTIC,
+            EvidenceRequirement.DETERMINISTIC_PLUS_VERIFICATION,
+        }
+        require_calculation = bool(det_evidence.intersection(evidence)) or final_wf in {
+            WorkflowProfile.SIMPLE,
+            WorkflowProfile.STANDARD,
+            WorkflowProfile.COMPLEX,
+        }
+        # Independent VerificationAgent is separate; deterministic checks are mandatory
+        # whenever calculation is required (SIMPLE included).
+        require_verification = require_calculation
+
         return RoutingDecision(
             classification=classification,
             final_workflow=final_wf,
@@ -200,6 +215,8 @@ class TaskRoutingPolicy(BaseModel):
             require_hitl=require_hitl,
             require_independent_review=require_independent_review,
             require_red_team=require_red_team,
+            require_calculation=require_calculation,
+            require_verification=require_verification,
             policy_overrides=overrides,
             policy_version=self.version,
             classifier_id=self.classifier,

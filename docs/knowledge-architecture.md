@@ -100,11 +100,11 @@ Details: [research-pipeline.md](research-pipeline.md).
 
 ### Computation artifacts
 
-`ComputationArtifact` (V2.4b/V2.4c/V2.5) carries `code_hash` / `input_hash` / `environment_hash` / `computation_hash` (Docker adds `image_digest`; in-process solvers set `sandbox_backend=in_process`). Graph types stay `CALCULATION` / `SIMULATION` / `ASSUMPTION` — no `PHYSICS_RESULT` node. See [compute-sandbox.md](compute-sandbox.md), [docker-sandbox.md](docker-sandbox.md), [engineering-simulation.md](engineering-simulation.md).
+`ComputationArtifact` (V2.4b/V2.4c/V2.5/V2.6) carries `code_hash` / `input_hash` / `environment_hash` / `computation_hash` (Docker adds `image_digest`; in-process solvers set `sandbox_backend=in_process`). V2.6 adds optional `calculation_spec_id`, `declared_outputs`, `task_id` (contract sidecar merge on load). Graph types stay `CALCULATION` / `SIMULATION` / `ASSUMPTION` — no `PHYSICS_RESULT` node. See [compute-sandbox.md](compute-sandbox.md), [docker-sandbox.md](docker-sandbox.md), [engineering-simulation.md](engineering-simulation.md), [benchmark-integrity.md](benchmark-integrity.md).
 
 ### Engineering verification (V2.2)
 
-Quantitative claims carry `verification_spec` (or legacy `math_check`). `DeterministicVerifier` uses Pint + an AST interpreter. Results are `GraphNodeType.CHECK` nodes (`TESTS` / `VERIFIED_BY` → CLAIM). See [engineering-verification.md](engineering-verification.md).
+Quantitative claims carry `verification_spec` (or legacy `math_check`). `DeterministicVerifier` uses Pint + an AST interpreter. Results are `GraphNodeType.CHECK` nodes (`TESTS` / `VERIFIED_BY` → CLAIM). V2.6: claims without computation provenance cannot enter accepted synthesis results. See [engineering-verification.md](engineering-verification.md).
 
 ### Record/replay
 

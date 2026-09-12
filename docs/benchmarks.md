@@ -22,6 +22,9 @@ python -m ai_lab benchmark evaluate simple_heater <run_id>
 Ожидаемый workflow: **SIMPLE**.
 Ожидаемый порядок ответа ~3–3.5 kW (не hardcode как oracle).
 
+V2.6: technical `COMPLETED` ≠ engineering `PASS`. Нерелевантный compute (например KV-cache)
+или пустая verification → `INSUFFICIENT_EVIDENCE`. См. [benchmark-integrity.md](benchmark-integrity.md).
+
 ## Benchmark 2 — `shaft_design`
 
 Предварительный диаметр стального вала (10 kW @ 1500 rpm + factor of safety).

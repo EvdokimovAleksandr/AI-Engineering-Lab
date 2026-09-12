@@ -140,6 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
     ui_p.add_argument("--host", default="127.0.0.1", help="Bind address")
     ui_p.add_argument("--port", type=int, default=8765, help="Bind port")
     ui_p.add_argument(
+        "--demo",
+        action="store_true",
+        help="Deterministic demo mode (mock-friendly; seeds demo_simple_heater project)",
+    )
+    ui_p.add_argument(
         "--config",
         type=Path,
         default=None,
@@ -272,7 +277,12 @@ def main(argv: list[str] | None = None) -> int:
         from ai_lab.cli_ui import run_ui_cli
 
         try:
-            return run_ui_cli(host=args.host, port=args.port, config_path=args.config)
+            return run_ui_cli(
+                host=args.host,
+                port=args.port,
+                config_path=args.config,
+                demo=bool(getattr(args, "demo", False)),
+            )
         except Exception as exc:
             logger.error("UI server failed: %s", exc)
             print(f"ERROR: {exc}", file=sys.stderr)

@@ -24,6 +24,51 @@ class BenchmarkSpec(BaseModel):
 
 
 def _default_expectations() -> dict[str, BenchmarkExpectation]:
+    from ai_lab.benchmark.models import InputAcceptance, OutputAcceptance
+
+    # simple_heater: order-of-magnitude band from evaluation.md (~3–3.5 kW).
+    # Both loss interpretations (×1.15 and /(1-0.15)) fall inside this band.
+    heater_power = OutputAcceptance(
+        output_id="power",
+        aliases=[
+            "heater_electrical_power",
+            "required_electric_power",
+            "required_electrical_power",
+            "required_heater_power",
+            "heater_power",
+            "electrical_power",
+            "P_elec",
+            "P",
+            "P_heater",
+        ],
+        dimension_unit="W",
+        min_value=3000.0,
+        max_value=3500.0,
+        band_unit="W",
+    )
+    # Input oracle catches wrong m / ΔT / t while accidental numeric match.
+    heater_inputs = [
+        InputAcceptance(
+            name="m_kg", aliases=["m", "mass_kg", "water_mass_kg"], value=20.0, required=False
+        ),
+        InputAcceptance(
+            name="dT", aliases=["delta_T", "delta_t", "dT_K"], value=60.0, required=False
+        ),
+        InputAcceptance(
+            name="t_s",
+            aliases=["t", "time_s", "heating_time_s"],
+            value=1800.0,
+            relative_tolerance=0.01,
+            required=False,
+        ),
+        InputAcceptance(
+            name="loss",
+            aliases=["loss_fraction", "losses"],
+            value=0.15,
+            absolute_tolerance=0.001,
+            required=False,
+        ),
+    ]
     return {
         "simple_heater": BenchmarkExpectation(
             benchmark_id="simple_heater",
@@ -32,7 +77,12 @@ def _default_expectations() -> dict[str, BenchmarkExpectation]:
             forbidden_workflows=[WorkflowProfile.RESEARCH],
             must_include_tasks=["calculation", "deterministic_verify"],
             must_exclude_tasks=["research", "red_team", "hypothesis"],
-            notes="Closed-form heater power; must not start full research workflow.",
+            notes=(
+                "Closed-form heater power; must not start full research workflow. "
+                "Acceptance: power in [3.0, 3.5] kW with correct inputs."
+            ),
+            acceptance_outputs=[heater_power],
+            acceptance_inputs=heater_inputs,
         ),
         "shaft_design": BenchmarkExpectation(
             benchmark_id="shaft_design",

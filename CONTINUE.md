@@ -50,7 +50,8 @@ python -m ai_lab run projects/spider_silk_industrial --provider mock
 | [docs/engineering-simulation.md](docs/engineering-simulation.md) | SimulationSpec, UniaxialTensionSolver, synthetic tensile benchmark |
 | [docs/task-routing.md](docs/task-routing.md) | Task Router: complexity/risk/uncertainty → workflow profiles |
 | [docs/benchmarks.md](docs/benchmarks.md) | simple_heater / shaft_design / spider_silk_review |
-| [docs/ui.md](docs/ui.md) | local HTML UI over LabRuntime |
+| [docs/benchmark-integrity.md](docs/benchmark-integrity.md) | V2.6: CalculationSpec, empty verification ≠ PASS, grounded synthesis |
+| [docs/ui.md](docs/ui.md) | V2.7 laboratory UI: projects, async runs, SSE, structured report |
 | [config/default.yaml](config/default.yaml) | provider, модели, sandbox, HITL, research/verification limits |
 | [projects/spider_silk_industrial/problem.md](projects/spider_silk_industrial/problem.md) | первый benchmark-проект |
 
@@ -69,8 +70,11 @@ LLMRouter выбирает ModelConfig из validated RoutingPolicy; LLM/researc
 python.execute идёт через ComputeSandbox (LocalSubprocessSandbox или DockerSandbox); DeterministicVerifier не заменяется sandbox'ом.
 Инженерная модель — SimulationSpec + SolverRegistry, не «LLM пишет Python в Docker».
 UI только ставит задачу в LabRuntime; sandbox/routing/budget из UI задать нельзя.
+V2.7: UI — research workstation (не chatbot); async runs + SSE; synthesis не переопределяет engineering_outcome.
 ```
 
 ## 7. Принцип системы (не забывать)
 
 AI не должен просто давать ответ. Нужна проверяемая цепочка: research → hypotheses → calculation/simulation → independent verification → red team → synthesis. Состояние — в файлах `projects/`, не в истории чата.
+
+UI — окно в лабораторию. Orchestration остаётся в LabRuntime.

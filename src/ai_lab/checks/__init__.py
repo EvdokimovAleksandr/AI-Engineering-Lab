@@ -15,6 +15,9 @@ from ai_lab.core.models import (
     VerificationResult,
     VerificationSpec,
 )
+from ai_lab.observability.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def _critical_line(claim_id: str, result: MathCheckResult) -> str:
@@ -27,18 +30,21 @@ async def run_deterministic_checks(
     execute_code: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
     limits: VerificationLimits | None = None,
     verification_cfg: dict[str, Any] | None = None,
+    require_specs_for_calculation: bool = False,
 ) -> DeterministicCheckReport:
     """
     Execute embedded verification_spec (preferred) or math_check requests.
 
     Critical failures = failed numeric/unit checks only.
-    Legacy CALCULATION claims without a spec are noted but do not poison the run
-    (they cannot create INDEPENDENT_EVIDENCE either).
+    CALCULATION claims without a spec cannot create INDEPENDENT_EVIDENCE.
+    When require_specs_for_calculation is True, such claims are logged; empty
+    reports still cannot PASS (evidence completeness / adjudication gates).
     """
     engine = DeterministicVerifier(limits or limits_from_config(verification_cfg))
     results: list[MathCheckResult] = []
     verification_results: list[VerificationResult] = []
     critical: list[str] = []
+    skipped_calculation = 0
 
     for claim in claims:
         if claim.verification_spec:
@@ -53,17 +59,33 @@ async def run_deterministic_checks(
                 critical.append(_critical_line(claim.claim_id, math_row))
             continue
         if not claim.math_check:
+            if require_specs_for_calculation and claim.kind.value == "CALCULATION":
+                skipped_calculation += 1
+                logger.error(
+                    "CALCULATION claim %s has no math_check/verification_spec",
+                    claim.claim_id,
+                )
             continue
         normalized = normalize_math_check_payload(
             {**claim.math_check, "claim_id": claim.claim_id}
         )
         req = MathCheckRequest.model_validate(normalized)
         result = await run_math_check(req, execute_code=execute_code, verifier=engine)
+        # Ensure claim_id is recoverable for synthesis grounding.
+        if not result.details.get("claim_id"):
+            result.details = {**result.details, "claim_id": claim.claim_id}
         results.append(result)
         if result.verification_result is not None:
             verification_results.append(result.verification_result)
         if not result.passed:
             critical.append(_critical_line(claim.claim_id, result))
+
+    if skipped_calculation and not results and not verification_results:
+                logger.error(
+                    "%s CALCULATION claim(s) without check specs "
+                    "(empty report -> INSUFFICIENT_EVIDENCE via completeness gate)",
+                    skipped_calculation,
+                )
 
     return DeterministicCheckReport(
         results=results,

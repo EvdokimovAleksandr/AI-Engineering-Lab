@@ -89,6 +89,7 @@ class LabRuntime:
         force_verification_fail: bool = False,
         resume_run_id: str | None = None,
         problem_override: str | None = None,
+        simulation_fixture: str | None = None,
     ) -> None:
         self.project = project
         self.config = config
@@ -130,6 +131,7 @@ class LabRuntime:
             config,
             cwd=None,  # never bind Cursor to project root
             force_verification_fail=force_verification_fail,
+            simulation_fixture=simulation_fixture,
             routing_context=RoutingContext(
                 run_id=self.run_id,
                 sink=self.sink,
@@ -156,6 +158,9 @@ class LabRuntime:
         self._last_red_team = None
         self._last_adjudication = None
         self._last_check_report = None
+        self._last_evidence_completeness = None
+        self._calculation_specs: list = []
+        self._relevance_results: list = []
         self._last_simulation_spec = None
         self._last_simulation_result = None
         self._task_graph: TaskGraph | None = None
@@ -164,6 +169,57 @@ class LabRuntime:
         self._task_graph_node_id: str | None = None
         self._routing_decision: RoutingDecision | None = None
         self._task_routing_policy = task_routing_policy_from_config(config)
+        # Tracks which UI stages already received stage.started (real graph, not fake timer).
+        self._ui_stages_started: set[str] = set()
+
+    def _stage_for_task(self, task: TaskSpec) -> str:
+        """Map a TaskGraph node to a UI pipeline stage from real task metadata."""
+        if task.state_context is not None:
+            return task.state_context.value
+        if task.task_kind == TaskKind.MODEL_BUILD:
+            return ProjectState.CALCULATION.value
+        if task.task_kind in {TaskKind.SIMULATION, TaskKind.SIMULATION_VERIFICATION}:
+            return ProjectState.SIMULATION.value
+        if task.task_kind == TaskKind.DETERMINISTIC_CHECK:
+            return ProjectState.VERIFICATION.value
+        if task.task_kind == TaskKind.ADJUDICATION:
+            return "ADJUDICATION"
+        if task.role == AgentRole.RESEARCH:
+            return ProjectState.RESEARCH.value
+        if task.role == AgentRole.THEORIST:
+            return ProjectState.HYPOTHESIS.value
+        if task.role == AgentRole.SIMULATION:
+            return ProjectState.SIMULATION.value
+        if task.role == AgentRole.VERIFICATION:
+            return ProjectState.VERIFICATION.value
+        if task.role == AgentRole.RED_TEAM:
+            return ProjectState.RED_TEAM.value
+        if task.role == AgentRole.CHIEF_ENGINEER:
+            return ProjectState.UNDERSTANDING.value
+        return "PLANNING"
+
+    def _emit_lifecycle(self, message: str, *, status: str = "ok", **data: object) -> None:
+        """Durable lifecycle event for UI/SSE — does not invent progress."""
+        self.sink.emit(
+            RunEvent(
+                run_id=self.run_id,
+                message=message,
+                status=status,
+                data={k: v for k, v in data.items() if v is not None},
+            )
+        )
+
+    def _maybe_complete_stage(self, stage: str) -> None:
+        """Emit stage.completed only when every TaskGraph node in that stage is done."""
+        graph = self._task_graph
+        if graph is None:
+            return
+        stage_tasks = [t for t in graph.tasks if self._stage_for_task(t) == stage]
+        if not stage_tasks:
+            return
+        done = {TaskStatus.SUCCESS, TaskStatus.SKIPPED}
+        if all(self._task_statuses.get(t.task_id) in done for t in stage_tasks):
+            self._emit_lifecycle("stage.completed", stage=stage)
 
     def _ctx(self) -> AgentContext:
         return AgentContext(
@@ -183,6 +239,7 @@ class LabRuntime:
                 "adjudication": self._last_adjudication,
                 "verification_report": self._last_verification,
                 "red_team_report": self._last_red_team,
+                "check_report": self._last_check_report,
                 "independence_assessment": self._independence_assessment,
                 "require_independent_review": (
                     self._routing_decision.require_independent_review
@@ -194,11 +251,23 @@ class LabRuntime:
                     if self._routing_decision is not None
                     else True
                 ),
+                "require_calculation": (
+                    self._routing_decision.require_calculation
+                    if self._routing_decision is not None
+                    else False
+                ),
+                "require_verification": (
+                    self._routing_decision.require_verification
+                    if self._routing_decision is not None
+                    else True
+                ),
                 "workflow_profile": (
                     self._routing_decision.final_workflow.value
                     if self._routing_decision is not None
                     else None
                 ),
+                "calculation_specs": list(getattr(self, "_calculation_specs", None) or []),
+                "relevance_results": list(getattr(self, "_relevance_results", None) or []),
             },
         )
 
@@ -481,6 +550,24 @@ class LabRuntime:
         )
         try:
             result = await agent.run(task, ctx)
+            # Propagate calculation contract state from agent context into runtime.
+            # IMPORTANT: ctx.extra may hold the same list object as self._*_ lists
+            # (passed by reference from _ctx). Never append while iterating that object.
+            incoming_specs = ctx.extra.get("calculation_specs") or []
+            if incoming_specs is self._calculation_specs:
+                incoming_specs = list(incoming_specs)
+            existing_ids = {s.spec_id for s in self._calculation_specs}
+            for spec in incoming_specs:
+                sid = getattr(spec, "spec_id", None)
+                if sid and sid not in existing_ids:
+                    self._calculation_specs.append(spec)
+                    existing_ids.add(sid)
+            incoming_rels = ctx.extra.get("relevance_results") or []
+            if incoming_rels is self._relevance_results:
+                # Agent did not replace the list — nothing new to merge.
+                incoming_rels = []
+            for rel in incoming_rels:
+                self._relevance_results.append(rel)
         except Exception as exc:
             duration_ms = (time.perf_counter() - t0) * 1000
             self.sink.emit(
@@ -530,6 +617,18 @@ class LabRuntime:
         self._task_statuses[task.task_id] = TaskStatus.RUNNING
         if task.state_context is not None:
             engine.set_state(task.state_context)
+        stage = self._stage_for_task(task)
+        # Emit stage.started once per stage from the real TaskGraph wave.
+        if stage not in self._ui_stages_started:
+            self._ui_stages_started.add(stage)
+            self._emit_lifecycle("stage.started", stage=stage, task_id=task.task_id)
+        self._emit_lifecycle(
+            "task.started",
+            stage=stage,
+            task_id=task.task_id,
+            task_kind=task.task_kind.value if task.task_kind else None,
+            role=task.role.value if task.role else None,
+        )
         started = datetime.now(timezone.utc)
         artifact_paths: list[str] = []
         claim_ids: list[str] = []
@@ -582,6 +681,15 @@ class LabRuntime:
                     finished_at=datetime.now(timezone.utc),
                 )
             )
+            self._emit_lifecycle(
+                "task.completed",
+                stage=stage,
+                task_id=task.task_id,
+                task_kind=task.task_kind.value if task.task_kind else None,
+                role=task.role.value if task.role else None,
+                artifact_count=len(artifact_paths),
+            )
+            self._maybe_complete_stage(stage)
             if pending_reentry is not None and pending_reentry != AdjudicationStatus.PASS:
                 await self._after_adjudication(engine, pending_reentry)
         except _HitlInterrupt:
@@ -596,6 +704,13 @@ class LabRuntime:
                     finished_at=datetime.now(timezone.utc),
                     error="HITL_REQUIRED",
                 )
+            )
+            self._emit_lifecycle(
+                "task.failed",
+                status="error",
+                stage=stage,
+                task_id=task.task_id,
+                reason="HITL_REQUIRED",
             )
             raise
         except Exception as exc:
@@ -612,6 +727,16 @@ class LabRuntime:
                 )
             )
             logger.error("Task %s failed: %s", task.task_id, exc)
+            self._emit_lifecycle(
+                "task.failed",
+                status="error",
+                stage=stage,
+                task_id=task.task_id,
+                reason=str(exc),
+            )
+            self._emit_lifecycle(
+                "stage.failed", status="error", stage=stage, task_id=task.task_id, reason=str(exc)
+            )
             raise
 
     async def _execute_graph_step(self, engine: WorkflowEngine) -> bool:
@@ -658,12 +783,26 @@ class LabRuntime:
     async def _after_adjudication(
         self, engine: WorkflowEngine, adj_status: AdjudicationStatus
     ) -> None:
-        """Verdict handling. TaskStatus stays SUCCESS; IterationPolicy is unchanged."""
+        """Verdict handling. TaskStatus stays SUCCESS; IterationPolicy is unchanged.
+
+        V2.6: SIMPLE quantitative runs still execute synthesis so the report can
+        honestly show INSUFFICIENT_EVIDENCE/FAIL. Technical COMPLETED ≠ PASS.
+        """
         if adj_status == AdjudicationStatus.PASS:
             return
         graph = self._task_graph
         if graph is None:
             return
+
+        # SIMPLE / checks-only profile: do not skip synthesis or re-enter forever.
+        simple_path = (
+            self._routing_decision is not None
+            and not self._routing_decision.require_independent_review
+        )
+        if simple_path:
+            # Leave synthesis PENDING so grounded (non-PASS) report is written.
+            return
+
         for task in graph.tasks:
             if (
                 task.state_context == ProjectState.SYNTHESIS
@@ -730,6 +869,7 @@ class LabRuntime:
         if synthesis and all(
             self._task_statuses.get(t.task_id) == TaskStatus.SUCCESS for t in synthesis
         ):
+            # Technical completion — engineering_outcome lives on adjudication/manifest.
             engine.set_state(ProjectState.COMPLETED)
             return
         if any(s == TaskStatus.HITL_REQUIRED for s in self._task_statuses.values()):
@@ -737,6 +877,22 @@ class LabRuntime:
             return
         if engine.snapshot.adjudication_status == AdjudicationStatus.DISPUTED:
             engine.set_state(ProjectState.DISPUTED)
+            return
+        # SIMPLE: synthesis after non-PASS still completes technically.
+        simple_path = (
+            self._routing_decision is not None
+            and not self._routing_decision.require_independent_review
+        )
+        if (
+            simple_path
+            and engine.snapshot.adjudication_status is not None
+            and synthesis
+            and all(
+                self._task_statuses.get(t.task_id) in {TaskStatus.SUCCESS, TaskStatus.SKIPPED}
+                for t in synthesis
+            )
+        ):
+            engine.set_state(ProjectState.COMPLETED)
             return
         if engine.snapshot.adjudication_status and engine.snapshot.adjudication_status != AdjudicationStatus.PASS:
             if engine.state not in {
@@ -890,6 +1046,7 @@ class LabRuntime:
             blind,
             execute_code=_exec,
             verification_cfg=self.config.verification,
+            require_specs_for_calculation=True,
         )
         self._last_check_report = check_report
         bundle = build_review_bundle(
@@ -908,9 +1065,13 @@ class LabRuntime:
             raise RuntimeError("Adjudication requires a deterministic check report")
         require_review = True
         require_rt = True
+        require_verification = True
+        require_calculation = False
         if self._routing_decision is not None:
             require_review = self._routing_decision.require_independent_review
             require_rt = self._routing_decision.require_red_team
+            require_verification = self._routing_decision.require_verification
+            require_calculation = self._routing_decision.require_calculation
         elif self._task_graph is not None:
             # Fallback: read flags from adjudication task metadata (profile graphs).
             for task in self._task_graph.tasks:
@@ -919,12 +1080,127 @@ class LabRuntime:
                         require_review = bool(task.metadata["require_independent_review"])
                     if "require_red_team" in task.metadata:
                         require_rt = bool(task.metadata["require_red_team"])
+                    if "require_verification" in task.metadata:
+                        require_verification = bool(task.metadata["require_verification"])
+                    if "require_calculation" in task.metadata:
+                        require_calculation = bool(task.metadata["require_calculation"])
+            # SIMPLE profile graphs always require deterministic verification for calc tasks.
+            if any(t.task_id == "calculation" for t in self._task_graph.tasks):
+                require_calculation = True
+                require_verification = True
+
+        from ai_lab.checks.calculation_contract import (
+            evaluate_evidence_completeness,
+            extract_outputs_from_understanding,
+        )
+        from ai_lab.core.models import CalculationSpec, VerificationPolicy
+
+        # Reload specs from disk (agent may have written them) + in-memory.
+        specs = list(self._calculation_specs)
+        spec_dir = self.project.root / self.run_store.rel("planner", "calculation_specs")
+        if spec_dir.is_dir():
+            import json as _json
+
+            for path in sorted(spec_dir.glob("*.json")):
+                # Skip soft-failed invalid_* proposals — they must not count as contracts.
+                if path.name.startswith("invalid_"):
+                    continue
+                try:
+                    specs.append(CalculationSpec.model_validate(_json.loads(path.read_text(encoding="utf-8"))))
+                except Exception as exc:
+                    logger.error("Failed to load CalculationSpec %s: %s", path, exc)
+        # Deduplicate by spec_id
+        by_id = {s.spec_id: s for s in specs}
+        specs = list(by_id.values())
+        self._calculation_specs = specs
+
+        comps = self.run_store.list_computations()
+        claims = self.evidence.list_claims(include_superseded=False)
+        understanding_outputs: list[str] = []
+        understanding_dims: dict[str, str] = {}
+        # Prefer run-scoped lock snapshot (synthesis must not overwrite policy).
+        understanding = None
+        try:
+            understanding = self.run_store.load_review_json("chief_understanding.json")
+        except Exception:
+            understanding = None
+        if understanding is None:
+            try:
+                understanding = self.project.read_json("reviews/chief_understanding.json")
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                logger.error("Failed reading chief_understanding for completeness: %s", exc)
+        if isinstance(understanding, dict):
+            understanding_outputs, understanding_dims = extract_outputs_from_understanding(
+                understanding
+            )
+        policy = VerificationPolicy(
+            verification_required=require_verification,
+            calculation_required=require_calculation,
+            minimum_checks=1 if require_verification else 0,
+            required_outputs=list(understanding_outputs),
+            required_output_dimensions=dict(understanding_dims),
+        )
+
+        # Generic benchmark acceptance when this project is a registered benchmark.
+        acceptance_passed: bool | None = None
+        acceptance_reasons: list[str] = []
+        output_aliases: dict[str, list[str]] = {}
+        try:
+            from ai_lab.benchmark.acceptance import evaluate_acceptance, output_alias_map
+            from ai_lab.benchmark.registry import get_benchmark
+
+            bspec = get_benchmark(self.repo_root, self.project.name)
+            output_aliases = output_alias_map(bspec.expectation)
+            if bspec.expectation.acceptance_outputs or bspec.expectation.acceptance_inputs:
+                arep = evaluate_acceptance(
+                    bspec.expectation,
+                    computations=comps,
+                    claims=claims,
+                    check_report=self._last_check_report,
+                )
+                acceptance_passed = arep.passed
+                acceptance_reasons = list(arep.reasons)
+                self.run_store.save_review_json(
+                    "benchmark_acceptance.json", arep.model_dump(mode="json")
+                )
+        except KeyError:
+            # Not a registered benchmark project — no numeric oracle.
+            pass
+        except Exception as exc:
+            logger.error("Benchmark acceptance evaluation failed: %s", exc)
+            # Fail closed for registered-looking projects only when get_benchmark worked;
+            # unexpected errors must not invent PASS.
+            if acceptance_passed is None:
+                acceptance_passed = False
+                acceptance_reasons = [f"acceptance evaluation error: {exc}"]
+
+        completeness = evaluate_evidence_completeness(
+            calculation_specs=specs,
+            computations=comps,
+            check_report=self._last_check_report,
+            claims=claims,
+            verification_policy=policy,
+            require_calculation=require_calculation,
+            relevance_results=list(self._relevance_results),
+            output_aliases=output_aliases,
+            acceptance_passed=acceptance_passed,
+            acceptance_reasons=acceptance_reasons,
+        )
+        self._last_evidence_completeness = completeness
+        self.run_store.save_review_json(
+            "evidence_completeness.json", completeness.model_dump(mode="json")
+        )
+
         adj = adjudicate(
             check_report=self._last_check_report,
             verification=self._last_verification,
             red_team=self._last_red_team,
             require_independent_review=require_review,
             require_red_team=require_rt,
+            evidence_completeness=completeness,
+            verification_required=require_verification,
         )
         adj.routing_policy_version = self.routing_policy.version
         adj.model_routing = {
@@ -965,6 +1241,21 @@ class LabRuntime:
                 )
             )
         return adj.status
+
+    def _persist_finish_manifest(self, *, final_state: str) -> None:
+        """Write live budget + engineering outcome into RunManifest."""
+        outcome = None
+        if self._last_adjudication is not None:
+            outcome = (
+                self._last_adjudication.engineering_outcome
+                or self._last_adjudication.status
+            ).value
+        self.run_store.finish_manifest(
+            final_state=final_state,
+            budget=self.budget,
+            engineering_outcome=outcome,
+            calculation_spec_ids=[s.spec_id for s in self._calculation_specs],
+        )
 
     async def _run_independent_review(self) -> AdjudicationStatus:
         """Deterministic checks → frozen ReviewBundle → V ∥ RT → adjudication.
@@ -1075,6 +1366,7 @@ class LabRuntime:
                 self.run_store.rel("inputs", "ui_problem.md"),
                 self.problem_override,
             )
+        self._emit_lifecycle("run.created", project_id=self.project.name)
 
         engine = WorkflowEngine(
             snapshot,
@@ -1087,11 +1379,35 @@ class LabRuntime:
             if engine.state != ProjectState.AWAITING_HUMAN:
                 try:
                     await self._prepare_task_graph()
+                    if self._task_graph is not None:
+                        self._emit_lifecycle(
+                            "pipeline.ready",
+                            graph_id=self._task_graph.graph_id,
+                            tasks=[
+                                {
+                                    "task_id": t.task_id,
+                                    "stage": self._stage_for_task(t),
+                                    "kind": t.task_kind.value if t.task_kind else None,
+                                    "role": t.role.value if t.role else None,
+                                }
+                                for t in self._task_graph.tasks
+                            ],
+                            workflow_profile=(
+                                self._routing_decision.final_workflow.value
+                                if self._routing_decision is not None
+                                else None
+                            ),
+                        )
                 except _HitlInterrupt as hitl_exc:
                     engine.snapshot.pending_hitl = hitl_exc.request.model_dump(mode="json")
                     engine.set_state(ProjectState.AWAITING_HUMAN)
                     self.project.save_snapshot(engine.snapshot)
-                    self.run_store.finish_manifest(final_state=engine.snapshot.state.value)
+                    self._persist_finish_manifest(final_state=engine.snapshot.state.value)
+                    self._emit_lifecycle(
+                        "run.completed",
+                        final_state=engine.snapshot.state.value,
+                        hitl_required=True,
+                    )
                     return engine.snapshot
 
             while not engine.is_terminal() and steps < max_iter:
@@ -1137,13 +1453,27 @@ class LabRuntime:
             engine.set_state(ProjectState.BUDGET_EXCEEDED)
             self.project.save_snapshot(engine.snapshot)
 
-        self.run_store.finish_manifest(final_state=engine.snapshot.state.value)
+        self._persist_finish_manifest(final_state=engine.snapshot.state.value)
         if engine.snapshot.state == ProjectState.COMPLETED:
             try:
                 self.knowledge.runs.freeze_run(self.run_id)
             except Exception as exc:
                 logger.error("Failed to freeze completed run: %s", exc)
                 raise
+        outcome = None
+        if self._last_adjudication is not None:
+            outcome = (
+                self._last_adjudication.engineering_outcome
+                or self._last_adjudication.status
+            )
+            if hasattr(outcome, "value"):
+                outcome = outcome.value
+        self._emit_lifecycle(
+            "run.completed",
+            final_state=engine.snapshot.state.value,
+            engineering_outcome=outcome,
+            hitl_required=engine.snapshot.state == ProjectState.AWAITING_HUMAN,
+        )
         return engine.snapshot
 
 

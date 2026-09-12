@@ -24,8 +24,13 @@ VerificationResult
  ↓
 VerificationAgent   (interpret only; may use a different routed model)
  ↓
-Adjudication        (deterministic FAIL cannot become PASS; optional model id is provenance only)
+Adjudication        (deterministic FAIL cannot become PASS; empty checks ≠ PASS;
+                     missing required evidence → INSUFFICIENT_EVIDENCE;
+                     optional model id is provenance only)
 ```
+
+V2.6 adds a **CalculationSpec** contract and evidence-completeness gate before adjudication.
+See [benchmark-integrity.md](benchmark-integrity.md).
 
 ## Numerical policy
 

@@ -7,7 +7,7 @@
 - Реализация P0/P1: [architecture-v2-implementation.md](architecture-v2-implementation.md)
 - Текущее поведение кода: [architecture.md](architecture.md)
 
-**Статус:** P0/P1 реализованы в коде (deterministic checks, ReviewBundle, parallel V∥RT, adjudication, RunManifest/Budget, synthesis gate, claim versioning, tool taint). Ниже — целевая модель; пункты без пометки «done in P1» остаются roadmap.
+**Статус:** P0/P1 реализованы в коде (deterministic checks, ReviewBundle, parallel V∥RT, adjudication, RunManifest/Budget, synthesis gate, claim versioning, tool taint). **V2.6** добавляет CalculationSpec, relevance/completeness gates и grounded synthesis — см. [benchmark-integrity.md](benchmark-integrity.md). Ниже — целевая модель; пункты без пометки «done» остаются roadmap.
 
 ---
 
@@ -171,7 +171,7 @@ artifact_root: projects/.../.runs/run_.../
 | Re-run code in sandbox | `python.execute` → ComputeSandbox (`LocalSubprocessSandbox` or `DockerSandbox`) |
 | Compare numeric tolerance / units | Deterministic |
 | Interpret semantic discrepancies | Verification LLM (optional) |
-| Final gate PASS | Rules: all critical checks green **and** no unresolved CRITICAL RT (or HITL accept) |
+| Final gate PASS | Rules: all critical checks green **and** required evidence complete **and** no unresolved CRITICAL RT (or HITL accept). Empty checks ≠ PASS (V2.6). |
 
 ### 5.2 Anti-collusion controls
 

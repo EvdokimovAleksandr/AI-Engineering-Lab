@@ -527,6 +527,112 @@ class VerificationSpec(BaseModel):
         return self
 
 
+class VerificationPolicy(BaseModel):
+    """Trusted verification requirements — LLM cannot weaken these fields.
+
+    Distinct from RoutingDecision flags: this is the contract for quantitative
+    engineering evidence completeness (checks / outputs / dimensions).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    verification_required: bool = True
+    calculation_required: bool = True
+    minimum_checks: int = Field(default=1, ge=0)
+    required_outputs: list[str] = Field(default_factory=list)
+    required_output_dimensions: dict[str, str] = Field(default_factory=dict)
+    # Explicit opt-out only — never implied by empty check reports.
+    verification_not_required: bool = False
+
+    @model_validator(mode="after")
+    def _opt_out_consistency(self) -> VerificationPolicy:
+        if self.verification_not_required:
+            # Explicit waiver: no mandatory checks.
+            object.__setattr__(self, "verification_required", False)
+            object.__setattr__(self, "minimum_checks", 0)
+        elif self.verification_required and self.minimum_checks < 1:
+            object.__setattr__(self, "minimum_checks", 1)
+        return self
+
+
+class CalculationSpec(BaseModel):
+    """Contract between a calculation Task and ComputationArtifact outputs.
+
+    LLM may propose objective/equations; policy-locked fields cannot be removed
+    to make an irrelevant computation PASS.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    spec_id: str = Field(default_factory=lambda: _new_id("cspec"))
+    task_id: str | None = None
+    run_id: str | None = None
+    objective: str = ""
+    required_inputs: list[str] = Field(default_factory=list)
+    required_outputs: list[str] = Field(default_factory=list)
+    expected_dimensions: dict[str, str] = Field(
+        default_factory=dict,
+        description="output_name → unit string (e.g. power → W)",
+    )
+    expected_relations: list[str] = Field(
+        default_factory=list,
+        description="Advisory equations (untrusted prose/symbols)",
+    )
+    domain: str | None = None
+    model_kind: str | None = None
+    verification_required: bool = True
+    minimum_checks: int = Field(default=1, ge=0)
+    # Names of fields locked by VerificationPolicy / runtime (not LLM-trustable).
+    trusted_fields: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ComputationRelevanceResult(BaseModel):
+    """Outcome of validate_computation_against_spec — not CheckStatus."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relevant: bool
+    calculation_spec_id: str | None = None
+    computation_artifact_id: str | None = None
+    missing_inputs: list[str] = Field(default_factory=list)
+    missing_outputs: list[str] = Field(default_factory=list)
+    dimension_mismatches: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class EvidenceCompletenessReport(BaseModel):
+    """Deterministic gate: PASS requires all mandatory evidence present and green."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    computation_complete: bool = False
+    computation_relevant: bool = False
+    verification_complete: bool = False
+    required_checks_pass: bool = False
+    provenance_complete: bool = False
+    # V2.6.1: every locked/required output needs claim←computation←verification chain.
+    required_output_coverage: bool = True
+    # V2.6.1: optional benchmark acceptance (True when no contract applies).
+    acceptance_passed: bool = True
+    reasons: list[str] = Field(default_factory=list)
+    relevance_results: list[ComputationRelevanceResult] = Field(default_factory=list)
+    required_checks: int = 0
+    executed_checks: int = 0
+
+    @property
+    def is_complete(self) -> bool:
+        return (
+            self.computation_complete
+            and self.computation_relevant
+            and self.verification_complete
+            and self.required_checks_pass
+            and self.provenance_complete
+            and self.required_output_coverage
+            and self.acceptance_passed
+        )
+
+
 class CheckStepResult(BaseModel):
     """One pipeline stage (normalize, compute, compare, bounds, sanity)."""
 
@@ -665,7 +771,10 @@ class ReviewBundle(BaseModel):
 
 
 class SynthesisBundle(BaseModel):
-    """Deterministic input for final report — LLM may polish prose only."""
+    """Deterministic input for final report — LLM may polish prose only.
+
+    Narrative is separated from accepted/verified engineering results.
+    """
 
     accepted_claims: list[dict[str, Any]] = Field(default_factory=list)
     rejected_claims: list[dict[str, Any]] = Field(default_factory=list)
@@ -677,6 +786,11 @@ class SynthesisBundle(BaseModel):
     residual_risks: list[str] = Field(default_factory=list)
     adjudication_status: AdjudicationStatus | None = None
     report_gate: str = "INCOMPLETE"  # PASS | DISPUTED | INCOMPLETE | INSUFFICIENT_EVIDENCE
+    # V2.6: separate LLM wording from verified quantitative results
+    narrative: str = ""
+    verified_results: list[dict[str, Any]] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+    provenance: list[str] = Field(default_factory=list)
 
 
 class ComputationArtifact(BaseModel):
@@ -722,6 +836,14 @@ class ComputationArtifact(BaseModel):
     image_digest: str | None = None
     environment_reproducibility: str | None = None  # full | partial | unknown
     determinism: str | None = None  # unknown | seeded — never auto-patched
+    # V2.6 calculation contract binding (optional for older artifacts)
+    task_id: str | None = None
+    calculation_spec_id: str | None = None
+    objective: str | None = None
+    # Structured outputs only — stdout text is never auto-promoted to claims.
+    declared_outputs: dict[str, Any] = Field(default_factory=dict)
+    input_claim_ids: list[str] = Field(default_factory=list)
+    output_claim_ids: list[str] = Field(default_factory=list)
 
 
 class RunBudget(BaseModel):
@@ -733,7 +855,10 @@ class RunBudget(BaseModel):
     max_cost: float = 50.0
     agent_calls: int = 0
     tool_calls: int = 0
-    tokens_used: int = 0
+    # None = unknown usage (provider did not report); 0 = known zero spend.
+    tokens_used: int | None = 0
+    # Sticky: any LLM completion without usage marks the ledger unknown.
+    tokens_unknown: bool = False
     cost_used: float = 0.0
     started_at: datetime = Field(default_factory=_utc_now)
 
@@ -775,6 +900,9 @@ class RunManifest(BaseModel):
     # Task Router decision snapshot (workflow profile). Optional for older manifests.
     task_routing_decision: dict[str, Any] | None = None
     workflow_profile: str | None = None
+    # V2.6 engineering outcome (PASS/FAIL/INSUFFICIENT_EVIDENCE) — not run lifecycle.
+    engineering_outcome: str | None = None
+    calculation_spec_ids: list[str] = Field(default_factory=list)
 
 
 class GraphNode(BaseModel):
@@ -819,3 +947,7 @@ class AdjudicationResult(BaseModel):
     routing_policy_version: str | None = None
     model_routing: dict[str, Any] | None = None
     independence_level: IndependenceLevel | None = None
+    # V2.6 evidence completeness snapshot (optional for older artifacts)
+    evidence_completeness: dict[str, Any] | None = None
+    # Engineering outcome may differ from run lifecycle COMPLETED.
+    engineering_outcome: AdjudicationStatus | None = None

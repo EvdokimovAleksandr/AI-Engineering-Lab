@@ -228,6 +228,115 @@ def pid_is_alive(pid: int | None) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def _windows_child_pids(root_pid: int) -> list[int]:
+    """Snapshot descendants of root_pid via Toolhelp32 (BFS)."""
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+
+    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        logger.error("CreateToolhelp32Snapshot failed: winerror=%s", ctypes.get_last_error())
+        return []
+    try:
+        parent_of: dict[int, int] = {}
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if not kernel32.Process32FirstW(snap, ctypes.byref(entry)):
+            return []
+        while True:
+            parent_of[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            if not kernel32.Process32NextW(snap, ctypes.byref(entry)):
+                break
+        # Collect all transitive children of root.
+        children: list[int] = []
+        frontier = [int(root_pid)]
+        seen = {int(root_pid)}
+        while frontier:
+            current = frontier.pop()
+            for pid, ppid in parent_of.items():
+                if ppid == current and pid not in seen:
+                    seen.add(pid)
+                    children.append(pid)
+                    frontier.append(pid)
+        return children
+    finally:
+        kernel32.CloseHandle(snap)
+
+
+def terminate_pid(pid: int) -> None:
+    """TerminateProcess for a single PID (Windows) / SIGKILL (POSIX)."""
+    if pid <= 0:
+        return
+    if sys.platform != "win32":
+        import os
+        import signal
+
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    handle = kernel32.OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return
+    try:
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess(handle, 1)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def kill_process_tree(root_pid: int | None) -> list[int]:
+    """Kill root and descendants. Returns descendant pids that were targeted.
+
+    Complements Job Object terminate when nested jobs / breakaway leave orphans.
+    Does not claim success — callers must re-check pid_is_alive.
+    """
+    if root_pid is None or root_pid <= 0:
+        return []
+    targeted: list[int] = []
+    if sys.platform == "win32":
+        targeted = _windows_child_pids(int(root_pid))
+        # Children first, then root (root may already be job-terminated).
+        for pid in reversed(targeted):
+            terminate_pid(pid)
+        terminate_pid(int(root_pid))
+    else:
+        import os
+        import signal
+
+        try:
+            os.killpg(int(root_pid), signal.SIGKILL)
+        except OSError:
+            terminate_pid(int(root_pid))
+    return targeted
+
+
 def job_query_info(job: WindowsJob | None) -> dict[str, Any]:
     if job is None:
         return {"attached": False}
