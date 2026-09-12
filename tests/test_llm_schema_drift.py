@@ -35,6 +35,59 @@ def test_coerce_str_list_from_chief_unknown_objects() -> None:
     assert all(isinstance(a, str) for a in claim.assumptions)
 
 
+def test_coerce_discrepancies_from_objects() -> None:
+    """Live Cursor returns discrepancy objects; VerificationReport needs list[str]."""
+    from ai_lab.agents.verification import coerce_discrepancies
+    from ai_lab.core.enums import VerificationStatus
+    from ai_lab.core.models import VerificationReport
+
+    raw = [
+        {
+            "claim_id": None,
+            "check": "units",
+            "message": "incompatible dimensions",
+            "deterministic_status": None,
+        },
+        {
+            "claim_id": "claim_6080f",
+            "check": "recompute",
+            "deterministic_status": "INCOMPATIBLE_DIMENSIONS",
+        },
+        "plain string already ok",
+    ]
+    coerced = coerce_discrepancies(raw)
+    assert all(isinstance(item, str) for item in coerced)
+    assert any("incompatible dimensions" in item for item in coerced)
+    assert any("claim_id=claim_6080f" in item for item in coerced)
+    assert "plain string already ok" in coerced
+    report = VerificationReport(
+        status=VerificationStatus.FAIL,
+        discrepancies=coerced,
+    )
+    assert report.discrepancies == coerced
+
+
+def test_coerce_discrepancies_non_list_fails_loud() -> None:
+    from ai_lab.agents.verification import coerce_discrepancies
+
+    with pytest.raises(ValueError, match="must be a list of strings"):
+        coerce_discrepancies(3)
+
+
+def test_coerce_optional_str_joins_evidence_list() -> None:
+    from ai_lab.agents.base import coerce_optional_str
+
+    evidence = coerce_optional_str(
+        ["payload.sources is an empty list", "queries_used equals 1"]
+    )
+    claim = Claim(
+        statement="stress scaling",
+        kind=EvidenceKind.INFERENCE,
+        evidence=evidence,
+    )
+    assert claim.evidence == "payload.sources is an empty list; queries_used equals 1"
+
+
 def test_coerce_str_list_accepts_plain_strings() -> None:
     assert coerce_str_list(["a", "b"]) == ["a", "b"]
     assert coerce_str_list("solo") == ["solo"]

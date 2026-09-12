@@ -132,7 +132,7 @@ def test_result_grounding_prefers_engineering_outcome(tmp_path: Path) -> None:
             {
                 "report_gate": "PASS",
                 "narrative": "Everything is fine and the answer is 999 kW.",
-                "verified_results": [],
+                "verified_results": [{"statement": "999 kW", "claim_id": "poison"}],
                 "caveats": [],
             }
         ),
@@ -148,7 +148,9 @@ def test_result_grounding_prefers_engineering_outcome(tmp_path: Path) -> None:
     view = build_result_view(store, run_id, manifest=manifest)
     assert view["engineering_outcome"] == "INSUFFICIENT_EVIDENCE"
     assert view["narrative_is_authoritative"] is False
-    assert "999" not in (view.get("key_numbers") or [])
+    dumped_numbers = json.dumps(view.get("key_numbers") or [])
+    assert "999" not in dumped_numbers
+    assert view.get("key_numbers") == []
     md = export_markdown(view)
     assert "INSUFFICIENT_EVIDENCE" in md
 
@@ -199,8 +201,8 @@ def test_http_async_create_and_status(tmp_path: Path) -> None:
         httpd.shutdown()
 
 
-def test_simple_heater_e2e_supported(tmp_path: Path) -> None:
-    """Deterministic heater fixture should surface SUPPORTED/PASS with ~3.2–3.3 kW class result."""
+def test_simple_heater_e2e_correct_passes(tmp_path: Path) -> None:
+    """Correct deterministic heater fixture must produce engineering PASS — not a status set."""
     pdir = _copy_heater(tmp_path)
     problem = (REPO / "benchmarks" / "simple_heater" / "problem.md").read_text(encoding="utf-8")
     created = create_run(
@@ -209,20 +211,80 @@ def test_simple_heater_e2e_supported(tmp_path: Path) -> None:
         projects_dir=pdir,
         config=_config(),
         wait=True,
+        simulation_fixture="heater_correct",
     )
     assert created["run_id"]
     result = get_result(created["run_id"], repo_root=REPO, projects_dir=pdir)
-    eng = str(result.get("engineering_outcome") or result.get("adjudication_status") or "")
-    # Mock heater path should pass adjudication when calculation is relevant.
-    assert eng in {"PASS", "SUPPORTED", "INSUFFICIENT_EVIDENCE", "FAIL", "DISPUTED"}
-    # Structured fields always present for UI
-    assert "confidence" in result
-    assert "executive_summary" in result
+    assert result.get("engineering_outcome") == "PASS"
+    assert result.get("computation_relevant") is True
+    assert result.get("acceptance_passed") is True
+    assert result.get("coverage") is True
+    assert result.get("evidence_complete") is True
+    assert result.get("verified_results")
     assert result.get("narrative_is_authoritative") is False
     st = get_status(created["run_id"], repo_root=REPO, projects_dir=pdir)
+    assert st.get("lifecycle_status") in {"COMPLETED", "PLANNED"}
     assert isinstance(st.get("pipeline"), list)
     events = get_events(created["run_id"], repo_root=REPO, projects_dir=pdir)
     assert isinstance(events.get("events"), list)
+
+
+def test_simple_heater_e2e_irrelevant_not_pass(tmp_path: Path) -> None:
+    """Off-topic compute may finish technically but must not be an engineering PASS."""
+    pdir = _copy_heater(tmp_path)
+    problem = (REPO / "benchmarks" / "simple_heater" / "problem.md").read_text(encoding="utf-8")
+    created = create_run(
+        {"problem": problem, "project": "simple_heater", "action": "run"},
+        repo_root=REPO,
+        projects_dir=pdir,
+        config=_config(),
+        wait=True,
+        simulation_fixture="kv_cache_unrelated",
+    )
+    result = get_result(created["run_id"], repo_root=REPO, projects_dir=pdir)
+    st = get_status(created["run_id"], repo_root=REPO, projects_dir=pdir)
+    assert st.get("lifecycle_status") == "COMPLETED"
+    assert result.get("engineering_outcome") != "PASS"
+    assert result.get("engineering_outcome") in {"INSUFFICIENT_EVIDENCE", "FAIL"}
+    assert result.get("computation_relevant") is False
+    assert result.get("acceptance_passed") is False
+
+
+def test_ui_provider_failure_is_not_engineering_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider error is a technical failure; engineering must not become PASS."""
+    from ai_lab.llm.errors import ProviderUnavailable
+    from ai_lab.llm.mock import MockProvider
+
+    async def _boom(self, request):  # noqa: ANN001
+        raise ProviderUnavailable("simulated provider outage")
+
+    monkeypatch.setattr(MockProvider, "complete", _boom)
+    pdir = _copy_heater(tmp_path)
+    problem = (REPO / "benchmarks" / "simple_heater" / "problem.md").read_text(encoding="utf-8")
+    created = create_run(
+        {"problem": problem, "project": "simple_heater", "action": "run", "wait": False},
+        repo_root=REPO,
+        projects_dir=pdir,
+        config=_config(),
+        wait=False,
+    )
+    deadline = time.time() + 30
+    final = None
+    while time.time() < deadline:
+        st = get_status(created["run_id"], repo_root=REPO, projects_dir=pdir)
+        if st.get("lifecycle_status") in {"COMPLETED", "FAILED", "ERROR"}:
+            final = st
+            break
+        time.sleep(0.1)
+    assert final is not None
+    assert final.get("lifecycle_status") == "ERROR"
+    result = get_result(created["run_id"], repo_root=REPO, projects_dir=pdir)
+    eng = result.get("engineering_outcome")
+    assert eng != "PASS"
+    assert eng != "SUPPORTED"
+    summary = str(result.get("executive_summary") or "")
+    assert "Investigation completed" not in summary
+    assert result.get("error")
 
 
 def test_auto_create_project_from_prompt(tmp_path: Path) -> None:

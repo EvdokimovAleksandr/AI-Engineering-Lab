@@ -84,6 +84,7 @@ def test_extract_usage_from_dict() -> None:
 async def test_cursor_malformed_json_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("cursor_sdk")
     monkeypatch.setenv("CURSOR_API_KEY", "test-key-not-real")
     provider = CursorSDKProvider(api_key="test-key-not-real", reasoning_only=True)
 
@@ -157,6 +158,14 @@ def test_env_example_documents_cursor_key() -> None:
     assert "git check-ignore" in text
 
 
+def _cursor_sdk_importable() -> bool:
+    try:
+        import cursor_sdk  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _cursor_live_ready() -> bool:
     import os
 
@@ -165,11 +174,7 @@ def _cursor_live_ready() -> bool:
     load_dotenv()
     if not (os.environ.get("CURSOR_API_KEY") or "").strip():
         return False
-    try:
-        import cursor_sdk  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    return _cursor_sdk_importable()
 
 
 @pytest.mark.cursor

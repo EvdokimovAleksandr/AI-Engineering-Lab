@@ -41,3 +41,8 @@ def canonical_graph(graph: TaskGraph) -> dict[str, Any]:
 
 def task_graph_hash(graph: TaskGraph) -> str:
     return sha256_json(canonical_graph(graph))
+
+
+def proposal_payload_hash(payload: Any) -> str:
+    """Content hash of a rejected or accepted proposal dump (not the execution graph id)."""
+    return sha256_json(payload)

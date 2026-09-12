@@ -3,7 +3,7 @@
 import pytest
 
 from ai_lab.core.enums import EvidenceKind
-from ai_lab.core.models import Claim, ConfidenceBreakdown
+from ai_lab.core.models import Claim, ConfidenceBreakdown, TaskGraphProposal
 
 
 def test_fact_requires_source_or_evidence() -> None:
@@ -46,3 +46,14 @@ def test_confidence_score_penalizes_contradictions() -> None:
         assumption_quality=0.8,
     )
     assert low.score() < high.score()
+
+
+def test_taskgraph_proposal_coerces_semver_version() -> None:
+    """LLM planners often emit '1.0.0'; the graph revision type is still int."""
+    proposal = TaskGraphProposal(graph_id="g1", version="1.0.0", tasks=[])
+    assert proposal.version == 1
+
+
+def test_taskgraph_proposal_rejects_non_numeric_version() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        TaskGraphProposal(graph_id="g1", version="latest", tasks=[])

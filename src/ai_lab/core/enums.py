@@ -51,7 +51,11 @@ class CheckStatus(str, Enum):
 
 
 class EvidenceKind(str, Enum):
-    """Strict typing of knowledge — ASSUMPTION must never silently become FACT."""
+    """Strict typing of knowledge — ASSUMPTION must never silently become FACT.
+
+    EVIDENCE_GAP is not an assumption: it records that required evidence was not
+    obtained. Missing sources must not be rewritten as “we assume there is none”.
+    """
 
     FACT = "FACT"
     HYPOTHESIS = "HYPOTHESIS"
@@ -61,6 +65,7 @@ class EvidenceKind(str, Enum):
     EXPERIMENT_RESULT = "EXPERIMENT_RESULT"
     OPINION = "OPINION"
     INFERENCE = "INFERENCE"
+    EVIDENCE_GAP = "EVIDENCE_GAP"
 
 
 class AgentRole(str, Enum):
@@ -403,3 +408,39 @@ class EvidenceConfidence(str, Enum):
     INPUT_UNVERIFIED = "INPUT_UNVERIFIED"
     VERIFIED_CALCULATION = "VERIFIED_CALCULATION"
     UNASSESSED = "UNASSESSED"
+
+
+class ScopeStatus(str, Enum):
+    """Investigation-scope gate. Not ProjectState and not AdjudicationStatus.
+
+    SCOPE_ASSUMED means safe domain defaults were locked explicitly.
+    SCOPE_NEEDS_CLARIFICATION pauses via existing HITL (AWAITING_HUMAN).
+    """
+
+    SCOPE_RESOLVED = "SCOPE_RESOLVED"
+    SCOPE_NEEDS_CLARIFICATION = "SCOPE_NEEDS_CLARIFICATION"
+    SCOPE_ASSUMED = "SCOPE_ASSUMED"
+    SCOPE_UNRESOLVED = "SCOPE_UNRESOLVED"
+
+
+class ResearchOutcome(str, Enum):
+    """Diagnostic of one research attempt / the recovery loop.
+
+    Distinct from AdjudicationStatus: a timeout is not “no evidence exists”.
+    """
+
+    RESEARCH_SUCCESS = "RESEARCH_SUCCESS"
+    RESEARCH_PARTIAL = "RESEARCH_PARTIAL"
+    RESEARCH_EMPTY = "RESEARCH_EMPTY"
+    RESEARCH_PROVIDER_ERROR = "RESEARCH_PROVIDER_ERROR"
+    RESEARCH_FILTERED = "RESEARCH_FILTERED"
+
+
+class AssumptionKind(str, Enum):
+    """Why an assumption exists — SCOPE_UNCERTAINTY must not hide as ASSUMPTION."""
+
+    INPUT_ASSUMPTION = "INPUT_ASSUMPTION"
+    MODEL_ASSUMPTION = "MODEL_ASSUMPTION"
+    PARAMETER_ESTIMATE = "PARAMETER_ESTIMATE"
+    SCOPE_ASSUMPTION = "SCOPE_ASSUMPTION"
+    EVIDENCE_LIMITATION = "EVIDENCE_LIMITATION"

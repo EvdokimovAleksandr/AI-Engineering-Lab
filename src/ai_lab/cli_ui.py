@@ -1,15 +1,41 @@
-"""CLI: python -m ai_lab ui [--demo]"""
+"""CLI: python -m ai_lab ui [--demo] [--config path]"""
 
 from __future__ import annotations
 
 import shutil
 from pathlib import Path
 
+from ai_lab.config_loader import load_config
+from ai_lab.core.models import LabConfig
 from ai_lab.observability.logger import get_logger
 from ai_lab.orchestrator.runtime import repo_root_from_here
 from ai_lab.ui.http import serve
 
 logger = get_logger(__name__)
+
+
+def _resolve_config_path(repo_root: Path, config_path: Path | None) -> Path:
+    """Trusted operator YAML only — never taken from the browser payload."""
+    if config_path is None:
+        return repo_root / "config" / "default.yaml"
+    path = config_path.expanduser()
+    if not path.is_absolute():
+        path = (repo_root / path).resolve()
+    else:
+        path = path.resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Config not found: {path}")
+    return path
+
+
+def _require_provider_ready(cfg: LabConfig) -> None:
+    """Fail at UI startup if the trusted provider cannot actually run."""
+    if cfg.provider != "cursor_sdk":
+        return
+    from ai_lab.llm.cursor_sdk import CursorSDKProvider
+
+    model = cfg.models.get("chief_engineer") or next(iter(cfg.models.values()), "composer-2.5")
+    CursorSDKProvider(default_model=model, reasoning_only=True)
 
 
 def _seed_demo_project(repo_root: Path) -> None:
@@ -48,10 +74,10 @@ def run_ui_cli(
     config_path: Path | None = None,
     demo: bool = False,
 ) -> int:
-    # config_path reserved so the CLI shape matches other subcommands; UI cannot override sandbox.
-    del config_path
     root = repo_root_from_here()
+    cfg = load_config(_resolve_config_path(root, config_path))
+    _require_provider_ready(cfg)
     if demo:
         _seed_demo_project(root)
-    serve(host=host, port=port, repo_root=root, demo_mode=demo)
+    serve(host=host, port=port, repo_root=root, demo_mode=demo, lab_config=cfg)
     return 0

@@ -51,12 +51,17 @@ def _dependency_version() -> str:
 
 class RunStore:
     """
-    projects/<name>/.runs/<run_id>/
+    projects/<name>/.runs/<run_id>/   # RUN-SCOPED (authoritative for a given run)
       manifest.json
+      final_report.md                 # canonical report for this run
       events.jsonl  (optional mirror)
       computations/<artifact_id>.json
       reviews/
+      claims/
       decisions/
+
+    Project-scoped (not a run's source of truth):
+      problem.md, project_meta.json, run index, legacy final_report.md
     """
 
     def __init__(self, project: ProjectStore, run_id: str) -> None:
@@ -262,6 +267,12 @@ class RunStore:
             out.append(art)
         return out
 
+    def save_text(self, name: str, content: str) -> str:
+        """Write a run-scoped text artifact (canonical final_report.md lives here)."""
+        if not name or "/" in name or "\\" in name or ".." in name:
+            raise ValueError(f"Illegal run-scoped text name: {name!r}")
+        return self.project.write_text(self.rel(name), content)
+
     def save_review_json(self, name: str, data: Any) -> str:
         return self.project.write_json(self.rel("reviews", name), data)
 
@@ -281,6 +292,13 @@ class RunStore:
         manifest.task_graph_id = graph_id
         manifest.task_graph_hash = graph_hash
         manifest.task_graph_version = version
+        self.save_manifest(manifest)
+        return manifest
+
+    def attach_planner(self, resolution: dict[str, Any]) -> RunManifest:
+        """Record planner reliability provenance on the existing RunManifest."""
+        manifest = self.load_manifest()
+        manifest.planner = resolution
         self.save_manifest(manifest)
         return manifest
 

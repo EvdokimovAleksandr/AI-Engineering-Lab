@@ -1,4 +1,9 @@
-"""JSONL run-event sink — thin foundation for future OpenTelemetry export."""
+"""JSONL run-event sink — thin foundation for future OpenTelemetry export.
+
+Persistence is the JSONL file (survives UI process restart as replay).
+Live listeners are in-process only — not a durable broker, not Kafka.
+Background UI jobs are threads in this process; they do not survive restart.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +12,20 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ai_lab.core.models import RunEvent
+from ai_lab.observability.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Live SSE subscribers: called after each durable append (UI transport only).
 EventListener = Callable[[RunEvent], None]
+
+
+def _parse_events(text: str) -> list[RunEvent]:
+    events: list[RunEvent] = []
+    for line in text.splitlines():
+        if line.strip():
+            events.append(RunEvent.model_validate_json(line))
+    return events
 
 
 class RunEventSink:
@@ -24,9 +40,22 @@ class RunEventSink:
             self.path.touch()
 
     def add_listener(self, listener: EventListener) -> None:
-        """Subscribe to live emits (e.g. SSE). Does not replay history."""
+        """Subscribe to live emits only. Prefer subscribe() for SSE replay."""
         with self._lock:
             self._listeners.append(listener)
+
+    def subscribe(self, listener: EventListener) -> list[RunEvent]:
+        """Atomically attach a live listener and snapshot already-persisted events.
+
+        Events in the returned list will not be delivered to `listener`.
+        Events appended after this call go only to `listener`.
+        Holding the emit lock here closes the replay/subscribe race:
+        replay-then-add_listener could drop an event that landed in between.
+        """
+        with self._lock:
+            self._listeners.append(listener)
+            text = self.path.read_text(encoding="utf-8")
+        return _parse_events(text)
 
     def remove_listener(self, listener: EventListener) -> None:
         with self._lock:
@@ -42,18 +71,14 @@ class RunEventSink:
         for listener in listeners:
             try:
                 listener(event)
-            except Exception:
+            except Exception as exc:
                 # Listener failure must not break the lab pipeline.
-                pass
+                logger.error("RunEventSink listener failed for %s: %s", event.event_id, exc)
 
     def read_all(self) -> list[RunEvent]:
         with self._lock:
             text = self.path.read_text(encoding="utf-8")
-        events: list[RunEvent] = []
-        for line in text.splitlines():
-            if line.strip():
-                events.append(RunEvent.model_validate_json(line))
-        return events
+        return _parse_events(text)
 
     def read_after(self, offset: int = 0) -> tuple[list[RunEvent], int]:
         """Read events starting at line offset; return (events, next_offset)."""

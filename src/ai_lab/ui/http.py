@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from ai_lab.core.models import RunEvent
+from ai_lab.core.models import LabConfig, RunEvent
 from ai_lab.observability.logger import get_logger
 from ai_lab.ui.service import (
     UiApiError,
@@ -26,6 +26,7 @@ from ai_lab.ui.service import (
     get_status,
     list_projects_detailed,
     list_recent_runs,
+    resume_run,
 )
 from ai_lab.ui.templates import INDEX_HTML
 
@@ -41,6 +42,8 @@ class LabUiHandler(BaseHTTPRequestHandler):
     repo_root: Path
     # Demo mode injects a banner / sample prompt into the SPA.
     demo_mode: bool = False
+    # Trusted LabConfig from CLI --config. None → service loads config/default.yaml.
+    lab_config: LabConfig | None = None
 
     def log_message(self, fmt: str, *args: object) -> None:
         logger.info("%s - %s", self.address_string(), fmt % args)
@@ -165,7 +168,11 @@ class LabUiHandler(BaseHTTPRequestHandler):
                 # UI path is async by default.
                 wait = bool(payload.get("wait", False))
                 result = create_project_run(
-                    parts[2], payload, repo_root=self.repo_root, wait=wait
+                    parts[2],
+                    payload,
+                    repo_root=self.repo_root,
+                    wait=wait,
+                    config=self.lab_config,
                 )
                 status, body, ctype = _json_bytes(result, 201)
                 self._send(status, body, ctype)
@@ -177,8 +184,22 @@ class LabUiHandler(BaseHTTPRequestHandler):
                 wait = bool(payload["wait"]) if "wait" in payload else False
                 if "async" in payload:
                     wait = not bool(payload["async"])
-                result = create_run(payload, repo_root=self.repo_root, wait=wait)
+                result = create_run(
+                    payload, repo_root=self.repo_root, wait=wait, config=self.lab_config
+                )
                 status, body, ctype = _json_bytes(result, 201)
+                self._send(status, body, ctype)
+                return
+
+            if parts[:2] == ["api", "runs"] and len(parts) == 4 and parts[3] == "resume":
+                payload = self._read_json()
+                result = resume_run(
+                    parts[2],
+                    payload,
+                    repo_root=self.repo_root,
+                    config=self.lab_config,
+                )
+                status, body, ctype = _json_bytes(result, 202)
                 self._send(status, body, ctype)
                 return
 
@@ -202,15 +223,23 @@ class LabUiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         q: queue.Queue[RunEvent | None] = queue.Queue()
+        sent_ids: set[str] = set()
 
         def _on_event(event: RunEvent) -> None:
             q.put(event)
 
-        # Replay durable history first so reconnect is consistent.
-        for event in sink.read_all():
+        def _send(event: RunEvent) -> None:
+            # Dedup by event_id so replay + live (or SSE+poll) cannot double-render.
+            if event.event_id in sent_ids:
+                return
+            sent_ids.add(event.event_id)
             self._write_sse(event)
-        sink.add_listener(_on_event)
+
+        # Atomic snapshot+subscribe: no gap between replay and live delivery.
+        snapshot = sink.subscribe(_on_event)
         try:
+            for event in snapshot:
+                _send(event)
             # Heartbeat + live follow. Stop shortly after terminal lifecycle events.
             idle_rounds = 0
             while idle_rounds < 120:  # ~60s idle after last event with 0.5s poll
@@ -229,12 +258,12 @@ class LabUiHandler(BaseHTTPRequestHandler):
                         break
                     continue
                 idle_rounds = 0
-                self._write_sse(event)
+                _send(event)
                 if event.message in {"run.completed", "run.failed"}:
                     # Drain briefly then close.
                     time.sleep(0.2)
                     while not q.empty():
-                        self._write_sse(q.get_nowait())
+                        _send(q.get_nowait())
                     break
         except (BrokenPipeError, ConnectionResetError):
             logger.info("SSE client disconnected for %s", run_id)
@@ -263,12 +292,17 @@ class LabUiHandler(BaseHTTPRequestHandler):
 
 
 def make_server(
-    host: str, port: int, *, repo_root: Path, demo_mode: bool = False
+    host: str,
+    port: int,
+    *,
+    repo_root: Path,
+    demo_mode: bool = False,
+    lab_config: LabConfig | None = None,
 ) -> ThreadingHTTPServer:
     handler = type(
         "BoundLabUiHandler",
         (LabUiHandler,),
-        {"repo_root": repo_root, "demo_mode": demo_mode},
+        {"repo_root": repo_root, "demo_mode": demo_mode, "lab_config": lab_config},
     )
     return ThreadingHTTPServer((host, port), handler)
 
@@ -279,9 +313,17 @@ def serve(
     *,
     repo_root: Path | None = None,
     demo_mode: bool = False,
+    lab_config: LabConfig | None = None,
 ) -> None:
     root = repo_root or Path(__file__).resolve().parents[3]
-    httpd = make_server(host, port, repo_root=root, demo_mode=demo_mode)
+    httpd = make_server(
+        host, port, repo_root=root, demo_mode=demo_mode, lab_config=lab_config
+    )
     mode = " (demo)" if demo_mode else ""
+    provider = lab_config.provider if lab_config is not None else "default.yaml"
+    research = (
+        (lab_config.research or {}).get("backend") if lab_config is not None else "default.yaml"
+    )
     print(f"AI Engineering Lab UI{mode}: http://{host}:{port}/")
+    print(f"trusted config: provider={provider} research.backend={research}")
     httpd.serve_forever()

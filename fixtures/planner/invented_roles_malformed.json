@@ -1,0 +1,42 @@
+{
+  "graph_id": "invented_roles_malformed",
+  "version": 1,
+  "tasks": [
+    {
+      "task_id": "req_analysis",
+      "role": "requirements_analyst",
+      "objective": "Extract a measurable question from the problem statement.",
+      "inputs": {
+        "problem_text": "How does max stress change if diameter doubles?"
+      },
+      "depends_on": [],
+      "output_schema": {
+        "type": "object",
+        "properties": { "research_question": { "type": "string" } }
+      },
+      "independence_group": "requirements",
+      "budget_slice": 0.08,
+      "priority": 100
+    },
+    {
+      "task_id": "mechanics",
+      "role": "mechanics_analyst",
+      "objective": "Compute stress scaling with diameter.",
+      "inputs": { "from": "req_analysis" },
+      "depends_on": ["req_analysis"],
+      "output_schema": "analysis",
+      "budget_slice": 3,
+      "priority": 80
+    },
+    {
+      "task_id": "writeup",
+      "role": "technical_writer",
+      "objective": "Write the report.",
+      "inputs": {},
+      "depends_on": ["mechanics"],
+      "output_schema": "synthesis_bundle",
+      "budget_slice": 1,
+      "priority": 10
+    }
+  ]
+}

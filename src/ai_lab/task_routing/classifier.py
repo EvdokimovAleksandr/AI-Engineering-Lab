@@ -98,6 +98,7 @@ def _haystack(context: Any) -> str:
     parts = [
         str(getattr(context, "project_id", "") or ""),
         str(getattr(context, "problem_text", "") or ""),
+        str(getattr(context, "resolved_objective", "") or ""),
         str(getattr(context, "requirements_text", "") or ""),
         str(getattr(context, "assumptions_text", "") or ""),
     ]
@@ -124,7 +125,12 @@ class HeuristicTaskClassifier:
         risk_hits = _count_hits(text, _HIGH_RISK_HINTS)
         unc_hits = _count_hits(text, _HIGH_UNCERTAINTY_HINTS)
 
-        # Domain / type from dominant hint family.
+        extra = getattr(context, "extra_data", None) or {}
+        hint = str(extra.get("pipeline_hint") or "") if isinstance(extra, dict) else ""
+        if hint == "research":
+            research_hits += 2
+        elif hint == "calculation":
+            simple_hits += 2
         if research_hits >= max(simple_hits, standard_hits, 1):
             task_type = "research_review"
             domain = "materials_biotech"

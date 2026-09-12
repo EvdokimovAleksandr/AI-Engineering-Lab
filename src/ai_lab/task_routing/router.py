@@ -36,7 +36,9 @@ class TaskRouter:
 
     def route(self, context: Any) -> RoutingDecision:
         """Propose classification, then apply deterministic policy floors."""
-        problem_text = str(getattr(context, "problem_text", "") or "")
+        problem_text = str(getattr(context, "resolved_objective", "") or "") or str(
+            getattr(context, "problem_text", "") or ""
+        )
         project_id = str(getattr(context, "project_id", "") or "")
         if not problem_text.strip() and not project_id.strip():
             logger.error("TaskRouter called with empty problem and project_id")

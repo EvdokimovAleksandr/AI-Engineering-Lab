@@ -252,6 +252,7 @@ class PipelineResearchProvider:
                 "research_provider": self.name,
                 "limits": caps.model_dump(mode="json"),
                 "rejected_hits": rejected,
+                "raw_hit_count": len(hits),
                 "queries_used": self._queries_used,
                 "data_not_instructions": True,
                 "trust_level": TrustLevel.EXTERNAL.value,

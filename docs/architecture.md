@@ -12,12 +12,14 @@
 
 `LabRuntime` исполняет **валидированный `TaskGraph`**, а не таблицу стадий как DAG.
 
-1. Planner (`static` | `llm`) → `TaskGraphProposal`
+0. **Scope gate (V2.8, не AgentRole):** `original_problem` неизменен → Investigation Scope → Clarification HITL при blocking ambiguity → locked `resolved_scope` **до** TaskRouter/Planner
+1. Planner (`static` | `llm`) → `TaskGraphProposal` (LLM is a proposal only; invalid graphs retry once then recover via `StaticPlanner` + TaskRouter profile — same validator, no role remapping)
 2. Deterministic `validate_task_graph` (DAG, roles, schemas, budget, independence, optional routing)
 3. Ready-set execution (fan-out / fan-in); each agent call goes through `LLMRouter` + `RoutingPolicy`
-4. На review-узлах: `DeterministicCheckReport` → frozen `ReviewBundle` → **Verification ∥ Red Team** → `Adjudication`
-5. Evidence completeness (V2.6): CalculationSpec + relevant ComputationArtifact + non-empty required checks
-6. PASS → grounded synthesis | иначе → honest gated report (SIMPLE) или `IterationPolicy` (graph revision vN)
+4. Research recovery (V2.8, отдельно от planner recovery): empty/filtered search → bounded query refinement → evidence sufficiency. Provider error ≠ «доказательств не существует»
+5. На review-узлах: `DeterministicCheckReport` → frozen `ReviewBundle` → **Verification ∥ Red Team** → `Adjudication`
+6. Evidence completeness (V2.6): CalculationSpec + relevant ComputationArtifact + non-empty required checks
+7. PASS → grounded synthesis | иначе → honest gated report (SIMPLE) или `IterationPolicy` (graph revision vN)
 
 `COMPLETED` означает только техническое завершение; `engineering_outcome` / adjudication — инженерный итог.
 
@@ -31,7 +33,15 @@
                Simple Local UI
                       │
                       ▼
-                  Problem
+              original_problem
+                      │
+                      ▼
+               Scope Resolution
+                      │
+            Clarification HITL?
+                      │
+                      ▼
+                 Task Router
                       │
                       ▼
                 TaskGraph Planner
@@ -47,6 +57,9 @@
        ┌──────────────┼────────────────┐
        ▼              ▼                ▼
    Research       Simulation       Calculation
+       │
+       ▼
+ Evidence recovery
                       │
                       ▼
              Engineering Model
@@ -82,6 +95,22 @@
                  Conclusion
 ```
 
+### Scope Gate
+
+The laboratory does not automatically convert ambiguous user intent into a definitive engineering specification.
+
+### Clarification Gate
+
+When ambiguity materially changes the investigation, the run pauses for user input via existing HITL/`--resume` / `POST /api/runs/{id}/resume`.
+
+### Research Recovery
+
+A zero-result search triggers diagnostic/refinement before being treated as evidence insufficiency. Planner recovery (invalid DAG → StaticPlanner) is a different loop.
+
+### Evidence Gate
+
+Missing evidence is not silently converted into assumptions. Provider failures are `RESEARCH_PROVIDER_ERROR`, not “no evidence exists”.
+
 ## Слои
 
 | Слой | Ответственность |
@@ -101,9 +130,9 @@
 ## Поток данных
 
 ```
-USER → Simple Local UI (optional) → Problem
-  → Planner → validated TaskGraph → LabRuntime
-  → Research / SimulationSpec / Solver / ComputationArtifact
+USER → original_problem → Scope Gate / Clarification HITL
+  → TaskRouter → Planner → validated TaskGraph → LabRuntime
+  → Research (+ recovery) / SimulationSpec / Solver / ComputationArtifact
   → deterministic checks → ReviewBundle
   → Verification ∥ Red Team → Adjudication
   → FAIL: IterationPolicy | PASS: SynthesisBundle → final_report.md

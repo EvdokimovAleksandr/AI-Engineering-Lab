@@ -64,6 +64,6 @@ class TaskPlanner(Protocol):
 
     name: str
 
-    async def propose(self, context: Any) -> TaskGraphProposal:
+    async def propose(self, context: Any, *, repair_errors: Any = None) -> TaskGraphProposal:
         """Return a structured proposal. Validation happens outside the planner."""
         ...

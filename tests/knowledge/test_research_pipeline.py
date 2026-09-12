@@ -450,3 +450,51 @@ def test_duckduckgo_html_parser() -> None:
     assert hits[0].uri == "https://example.edu/silk"
     assert hits[0].title == "Silk paper"
     assert any("nist.gov" in h.uri for h in hits)
+
+
+def test_conditions_list_does_not_crash_provenance_lock() -> None:
+    """Live Cursor often returns conditions as a list; dict(list) used to abort the run."""
+    from ai_lab.core.models import Claim
+    from ai_lab.core.enums import EvidenceKind
+    from ai_lab.knowledge.provenance_lock import conditions_as_dict, lock_research_provenance
+
+    assert conditions_as_dict(["F"]) == {"notes": ["F"]}
+    source, tier, conditions, refs = lock_research_provenance(
+        {
+            "statement": "Max stress scales with 1/d^2",
+            "kind": "INFERENCE",
+            "conditions": ["F", "elastic", "circular cross-section"],
+        },
+        {"sources": [], "evidence": []},
+    )
+    assert conditions["notes"] == ["F", "elastic", "circular cross-section"]
+    assert conditions["retrieved"] is False
+    claim = Claim(
+        statement="Max stress scales with 1/d^2",
+        kind=EvidenceKind.INFERENCE,
+        source=source,
+        source_trust=tier,
+        conditions=conditions,
+        refs=refs,
+    )
+    assert claim.conditions["notes"][0] == "F"
+
+
+def test_conditions_string_does_not_crash_provenance_lock() -> None:
+    from ai_lab.knowledge.provenance_lock import conditions_as_dict, lock_research_provenance
+
+    assert conditions_as_dict("elastic, F held constant") == {
+        "notes": ["elastic, F held constant"]
+    }
+    _, _, conditions, _ = lock_research_provenance(
+        {"statement": "x", "kind": "INFERENCE", "conditions": "elastic"},
+        {"sources": [], "evidence": []},
+    )
+    assert conditions["notes"] == ["elastic"]
+
+
+def test_conditions_non_object_fails_loud() -> None:
+    from ai_lab.knowledge.provenance_lock import conditions_as_dict
+
+    with pytest.raises(ValueError, match="must be an object"):
+        conditions_as_dict(3)

@@ -19,7 +19,7 @@ from ai_lab.core.models import LabConfig
 from ai_lab.memory.project_store import ProjectStore
 from ai_lab.observability.logger import get_logger
 from ai_lab.observability.tracing import RunEventSink
-from ai_lab.orchestrator.hitl import HitlGate
+from ai_lab.orchestrator.hitl import HitlDecision, HitlGate
 from ai_lab.orchestrator.runtime import LabRuntime
 
 logger = get_logger(__name__)
@@ -88,14 +88,20 @@ def start_run_job(
     repo_root: Path,
     problem: str,
     auto_approve_hitl: bool = False,
+    simulation_fixture: str | None = None,
 ) -> RunJob:
-    """Create LabRuntime, persist RUNNING lifecycle, execute in a daemon thread."""
+    """Create LabRuntime, persist RUNNING lifecycle, execute in a daemon thread.
+
+    Jobs are in-process threads — they do not survive UI process restart.
+    Event JSONL on disk still allows SSE replay of already-emitted events.
+    """
     runtime = LabRuntime(
         store,
         config,
         repo_root=repo_root,
         hitl=HitlGate(auto_approve=auto_approve_hitl),
         problem_override=problem,
+        simulation_fixture=simulation_fixture,
     )
     # Manifest + problem snapshot before the thread starts so GET /runs/{id} works immediately.
     runtime.run_store.build_manifest(
@@ -126,10 +132,14 @@ def start_run_job(
             if snapshot.adjudication_status is not None:
                 eng = snapshot.adjudication_status.value
             status = "COMPLETED"
+            error = None
             if snapshot.state == ProjectState.BUDGET_EXCEEDED:
                 status = "FAILED"
+                # Runtime swallows BudgetExceeded so the snapshot is saved; surface the reason.
+                error = runtime.stop_reason or "budget exceeded"
+                job.error = error
             elif snapshot.state == ProjectState.AWAITING_HUMAN:
-                status = "COMPLETED"  # terminal for UI; HITL flagged in result
+                status = "AWAITING_HUMAN"
             job.status = status
             job.finished_at = datetime.now(timezone.utc).isoformat()
             write_lifecycle(
@@ -143,7 +153,7 @@ def start_run_job(
                     "finished_at": job.finished_at,
                     "final_state": snapshot.state.value,
                     "engineering_outcome": eng,
-                    "error": None,
+                    "error": error,
                 },
             )
         except Exception as exc:
@@ -181,6 +191,98 @@ def start_run_job(
             unregister_live(runtime.run_id)
 
     thread = threading.Thread(target=_worker, name=f"lab-run-{runtime.run_id}", daemon=True)
+    job.thread = thread
+    thread.start()
+    return job
+
+
+def resume_run_job(
+    *,
+    store: ProjectStore,
+    config: LabConfig,
+    repo_root: Path,
+    run_id: str,
+    choice: str | None = None,
+    note: str = "",
+    answers: dict[str, str] | None = None,
+) -> RunJob:
+    """Continue the same run_id after a scope/HITL pause. Does not create a new project."""
+    if not run_id:
+        raise ValueError("resume requires run_id")
+    decision = HitlDecision(approved=True, choice=choice, note=note or "", answers=answers)
+    runtime = LabRuntime(
+        store,
+        config,
+        repo_root=repo_root,
+        hitl=HitlGate(auto_approve=False, pending_decision=decision),
+        resume_run_id=run_id,
+        problem_override=None,
+    )
+    job = RunJob(run_id=run_id, project_id=store.name, sink=runtime.sink)
+    write_lifecycle(
+        store,
+        run_id,
+        {
+            "run_id": run_id,
+            "project_id": store.name,
+            "status": "RUNNING",
+            "started_at": job.started_at,
+            "error": None,
+        },
+    )
+    register_job(job)
+
+    def _worker() -> None:
+        try:
+            snapshot = asyncio.run(runtime.run())
+            eng = None
+            if snapshot.adjudication_status is not None:
+                eng = snapshot.adjudication_status.value
+            status = "COMPLETED"
+            error = None
+            if snapshot.state == ProjectState.BUDGET_EXCEEDED:
+                status = "FAILED"
+                error = runtime.stop_reason or "budget exceeded"
+                job.error = error
+            elif snapshot.state == ProjectState.AWAITING_HUMAN:
+                status = "AWAITING_HUMAN"
+            job.status = status
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            write_lifecycle(
+                store,
+                runtime.run_id,
+                {
+                    "run_id": runtime.run_id,
+                    "project_id": store.name,
+                    "status": status,
+                    "started_at": job.started_at,
+                    "finished_at": job.finished_at,
+                    "final_state": snapshot.state.value,
+                    "engineering_outcome": eng,
+                    "error": error,
+                },
+            )
+        except Exception as exc:
+            logger.error("UI resume job %s failed: %s", runtime.run_id, exc)
+            job.status = "ERROR"
+            job.error = str(exc)
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            write_lifecycle(
+                store,
+                runtime.run_id,
+                {
+                    "run_id": runtime.run_id,
+                    "project_id": store.name,
+                    "status": "ERROR",
+                    "started_at": job.started_at,
+                    "finished_at": job.finished_at,
+                    "error": str(exc),
+                },
+            )
+        finally:
+            unregister_live(runtime.run_id)
+
+    thread = threading.Thread(target=_worker, name=f"lab-resume-{run_id}", daemon=True)
     job.thread = thread
     thread.start()
     return job

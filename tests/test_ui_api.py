@@ -165,7 +165,14 @@ def test_ui_plan_writes_existing_run_artifacts(tmp_path: Path) -> None:
     """Plan+status go through LabRuntime artifacts under .runs/."""
     pdir = _copy_project(tmp_path)
     created = create_run(
-        {"problem": "tensile check", "project": "spider_silk_industrial", "action": "plan"},
+        {
+            "problem": (
+                "How can spider silk be reproduced at industrial scale, including "
+                "spinning bottlenecks and mechanical properties?"
+            ),
+            "project": "spider_silk_industrial",
+            "action": "plan",
+        },
         repo_root=REPO,
         projects_dir=pdir,
         config=_config(),
@@ -175,4 +182,4 @@ def test_ui_plan_writes_existing_run_artifacts(tmp_path: Path) -> None:
     assert (run_dir / "planner" / "task_graph.json").is_file()
     assert (run_dir / "planner" / "validation.json").is_file()
     graph = json.loads((run_dir / "planner" / "task_graph.json").read_text(encoding="utf-8"))
-    assert graph["graph_id"] == "standard_pipeline"
+    assert graph["graph_id"] in {"standard_pipeline", "research_pipeline"}

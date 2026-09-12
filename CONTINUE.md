@@ -51,7 +51,7 @@ python -m ai_lab run projects/spider_silk_industrial --provider mock
 | [docs/task-routing.md](docs/task-routing.md) | Task Router: complexity/risk/uncertainty → workflow profiles |
 | [docs/benchmarks.md](docs/benchmarks.md) | simple_heater / shaft_design / spider_silk_review |
 | [docs/benchmark-integrity.md](docs/benchmark-integrity.md) | V2.6: CalculationSpec, empty verification ≠ PASS, grounded synthesis |
-| [docs/ui.md](docs/ui.md) | V2.7 laboratory UI: projects, async runs, SSE, structured report |
+| [docs/ui.md](docs/ui.md) | V2.7 / V2.7.1 laboratory UI: projects, async runs, SSE, run-scoped report |
 | [config/default.yaml](config/default.yaml) | provider, модели, sandbox, HITL, research/verification limits |
 | [projects/spider_silk_industrial/problem.md](projects/spider_silk_industrial/problem.md) | первый benchmark-проект |
 
@@ -71,6 +71,8 @@ python.execute идёт через ComputeSandbox (LocalSubprocessSandbox или
 Инженерная модель — SimulationSpec + SolverRegistry, не «LLM пишет Python в Docker».
 UI только ставит задачу в LabRuntime; sandbox/routing/budget из UI задать нельзя.
 V2.7: UI — research workstation (не chatbot); async runs + SSE; synthesis не переопределяет engineering_outcome.
+V2.7.2: LLM planner предлагает; validator — authority; невалидный граф → 1 retry → StaticPlanner (профиль TaskRouter); роли не remap-ятся.
+V2.8: Scope Gate до Planner; HITL clarification через существующий resume; research recovery отдельно от planner recovery; evidence gap ≠ assumption.
 ```
 
 ## 7. Принцип системы (не забывать)

@@ -22,9 +22,10 @@ class ChiefEngineerAgent(BaseAgent):
     role = AgentRole.CHIEF_ENGINEER
     system_prompt = (
         "You are the Chief Engineer of an AI Engineering Lab. "
-        "You formalize the problem, decompose work, detect contradictions, "
-        "and schedule specialists. You do NOT decide what is proven — "
-        "adjudication and evidence do. Return JSON only."
+            "You formalize the problem, decompose work, detect contradictions, "
+            "and schedule specialists. Scope resolution is an orchestrator gate, "
+            "not a new agent role. You do NOT decide what is proven — "
+            "adjudication and evidence do. Return JSON only."
     )
 
     async def run(self, task: TaskSpec, ctx: AgentContext) -> AgentResult:
@@ -39,20 +40,50 @@ class ChiefEngineerAgent(BaseAgent):
             or (task.state_context is not None and task.state_context.value == "SYNTHESIS")
         )
 
+        locked = ctx.extra.get("investigation_scope")
+        locked_outputs: list[str] | None = None
+        locked_dims: dict | None = None
+        locked_objective = ""
+        if locked is not None:
+            locked_outputs = list(getattr(locked, "required_outputs", None) or [])
+            locked_dims = dict(getattr(locked, "expected_dimensions", None) or {})
+            locked_objective = str(getattr(locked, "objective", "") or "")
+            original = str(getattr(locked, "original_problem", "") or "")
+        else:
+            original = problem
+
+        user = (
+            f"Objective: {task.objective}\n\n"
+            f"Original user problem (immutable):\n{original}\n\n"
+        )
+        if locked_objective:
+            user += f"Locked investigation objective:\n{locked_objective}\n\n"
+        user += (
+            "Return JSON with keys: summary (string), understanding (string), "
+            "unknowns (array of strings), follow_up_roles (array of role name strings), "
+            "required_outputs (array of output names the quantitative answer must produce), "
+            "expected_dimensions (object mapping each required_output name → unit string, "
+            "e.g. power→W). required_outputs must reflect the problem, not a substitute task. "
+            "Do not rewrite the original user problem. Do not drop locked required_outputs."
+        )
+
         payload = await llm_json(
             ctx,
             role=self.role,
             system=self.system_prompt,
-            user=(
-                f"Objective: {task.objective}\n\nProblem file:\n{problem}\n\n"
-                "Return JSON with keys: summary (string), understanding (string), "
-                "unknowns (array of strings), follow_up_roles (array of role name strings), "
-                "required_outputs (array of output names the quantitative answer must produce), "
-                "expected_dimensions (object mapping each required_output name → unit string, "
-                "e.g. power→W). required_outputs must reflect the problem, not a substitute task."
-            ),
+            user=user,
             schema_name="ChiefEngineerPlan",
         )
+
+        # Locked scope wins over LLM: required_outputs cannot be removed.
+        if locked_outputs:
+            merged = list(dict.fromkeys([*locked_outputs, *coerce_str_list(payload.get("required_outputs"))]))
+            payload["required_outputs"] = merged
+            dims = dict(payload.get("expected_dimensions") or {})
+            dims.update(locked_dims or {})
+            payload["expected_dimensions"] = dims
+        if locked_objective and not payload.get("understanding"):
+            payload["understanding"] = locked_objective
 
         path = "reviews/chief_understanding.json"
         # Understanding lock is immutable for the run: synthesis must not overwrite it.
@@ -135,6 +166,15 @@ class ChiefEngineerAgent(BaseAgent):
                 check_report=ctx.extra.get("check_report"),
                 narrative=str(payload.get("summary") or ""),
             )
+            scope = ctx.extra.get("investigation_scope")
+            if scope is not None:
+                bundle.scope = scope.model_dump(mode="json") if hasattr(scope, "model_dump") else dict(scope)
+            sufficiency = ctx.extra.get("research_sufficiency")
+            if sufficiency is not None:
+                bundle.research_status = getattr(sufficiency, "outcome", None)
+                if hasattr(bundle.research_status, "value"):
+                    bundle.research_status = bundle.research_status.value
+                bundle.evidence_gaps = list(getattr(sufficiency, "evidence_gaps", None) or [])
             await ctx.tools.call(
                 "artifacts.save",
                 allowed=ctx.allowed_tools_for(self.role, task),
@@ -160,6 +200,8 @@ class ChiefEngineerAgent(BaseAgent):
                 )
 
             report = render_final_report(bundle, llm_polish=payload)
+            # Compatibility-only: project-root file is last-writer-wins across runs.
+            # UI / GET result must not treat this as the source of truth for a run.
             await ctx.tools.call(
                 "files.write",
                 allowed=ctx.allowed_tools_for(self.role, task),
@@ -167,6 +209,10 @@ class ChiefEngineerAgent(BaseAgent):
                 content=report,
             )
             artifact_paths.append("final_report.md")
+            # Canonical run-scoped report — each run keeps its own namespace.
+            if ctx.run_store is not None:
+                ctx.run_store.save_text("final_report.md", report)
+                artifact_paths.append(ctx.run_store.rel("final_report.md"))
 
         return AgentResult(
             agent_role=self.role,

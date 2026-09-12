@@ -8,6 +8,44 @@ from __future__ import annotations
 from ai_lab.core.enums import AgentRole, TaskKind
 from ai_lab.tools.registry import DEFAULT_TRUST
 
+# Closed-world identifiers. Prompt, schema, and validator must all read these —
+# do not copy role/kind lists by hand in other modules.
+def allowed_role_values() -> tuple[str, ...]:
+    """Canonical AgentRole values. LLM may not invent names outside this tuple."""
+    return tuple(role.value for role in AgentRole)
+
+
+def allowed_task_kind_values() -> tuple[str, ...]:
+    """Canonical TaskKind values. LLM may not invent kinds outside this tuple."""
+    return tuple(kind.value for kind in TaskKind)
+
+
+def allowed_output_schema_values() -> tuple[str, ...]:
+    return tuple(OUTPUT_SCHEMAS.keys())
+
+
+def planner_contract_text() -> str:
+    """Machine-readable contract injected into the planner prompt (not authority)."""
+    roles = ", ".join(allowed_role_values())
+    kinds = ", ".join(allowed_task_kind_values())
+    schemas = ", ".join(allowed_output_schema_values())
+    return (
+        "You are proposing a plan inside an existing fixed agent architecture.\n"
+        "You do not invent roles. You do not invent tools. You do not invent task kinds.\n"
+        "You do not change security policy, sandbox policy, or budget policy.\n"
+        "You may only select from the provided enums and schemas.\n"
+        "Return only the requested structured object.\n\n"
+        f"Allowed roles: {roles}\n"
+        f"Allowed task_kind: {kinds}\n"
+        f"Allowed output_schema (string, not a JSON Schema object): {schemas}\n"
+        "inputs: array of strings (artifact or task ids), never an object.\n"
+        "depends_on: array of task_id strings.\n"
+        "budget_slice: omit (preferred) or object "
+        "{max_agent_calls, max_tool_calls, max_tokens, max_cost} — never a number.\n"
+        "Forbidden: command, script, shell, cwd, path, review_bundle_path, "
+        "routing_policy, api_key, sandbox_policy, docker_args, host_path.\n"
+    )
+
 # JSON object keys that must never appear in a planner proposal (any nesting).
 # TaskSpec describes work, not a command to execute.
 FORBIDDEN_PROPOSAL_KEYS = frozenset(

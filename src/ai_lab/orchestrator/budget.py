@@ -29,26 +29,33 @@ def budget_from_config(config: LabConfig) -> RunBudget:
     )
 
 
-def check_budget(budget: RunBudget) -> None:
-    """Raise BudgetExceeded if any hard limit is crossed."""
+def budget_violation_message(budget: RunBudget, *, include_runtime: bool = True) -> str | None:
+    """Same checks as ``check_budget``, as a string for UI/lifecycle (never hide the reason).
+
+    ``include_runtime=False`` when reconstructing from a saved manifest: wall-clock
+    must not be re-evaluated hours later.
+    """
     if budget.agent_calls > budget.max_agent_calls:
-        raise BudgetExceeded(
-            f"max_agent_calls exceeded: {budget.agent_calls}>{budget.max_agent_calls}"
-        )
+        return f"max_agent_calls exceeded: {budget.agent_calls}>{budget.max_agent_calls}"
     if budget.tool_calls > budget.max_tool_calls:
-        raise BudgetExceeded(
-            f"max_tool_calls exceeded: {budget.tool_calls}>{budget.max_tool_calls}"
-        )
+        return f"max_tool_calls exceeded: {budget.tool_calls}>{budget.max_tool_calls}"
     # Unknown usage is not treated as zero — skip token cap until usage is known.
     if budget.tokens_used is not None and budget.tokens_used > budget.max_tokens:
-        raise BudgetExceeded(f"max_tokens exceeded: {budget.tokens_used}>{budget.max_tokens}")
+        return f"max_tokens exceeded: {budget.tokens_used}>{budget.max_tokens}"
     if budget.cost_used > budget.max_cost:
-        raise BudgetExceeded(f"max_cost exceeded: {budget.cost_used}>{budget.max_cost}")
-    elapsed = (datetime.now(timezone.utc) - budget.started_at).total_seconds()
-    if elapsed > budget.max_runtime_seconds:
-        raise BudgetExceeded(
-            f"max_runtime_seconds exceeded: {elapsed}>{budget.max_runtime_seconds}"
-        )
+        return f"max_cost exceeded: {budget.cost_used}>{budget.max_cost}"
+    if include_runtime:
+        elapsed = (datetime.now(timezone.utc) - budget.started_at).total_seconds()
+        if elapsed > budget.max_runtime_seconds:
+            return f"max_runtime_seconds exceeded: {elapsed}>{budget.max_runtime_seconds}"
+    return None
+
+
+def check_budget(budget: RunBudget) -> None:
+    """Raise BudgetExceeded if any hard limit is crossed."""
+    msg = budget_violation_message(budget)
+    if msg:
+        raise BudgetExceeded(msg)
 
 
 def record_agent_call(budget: RunBudget, *, tokens: int = 0, cost: float = 0.0) -> None:

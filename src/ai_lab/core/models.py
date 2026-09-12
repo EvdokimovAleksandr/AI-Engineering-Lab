@@ -238,6 +238,10 @@ class TaskSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    # LLM-owned (proposal): task_id, role, task_kind, objective, inputs, depends_on,
+    # output_schema, independence_group, priority, optional budget_slice.
+    # Trusted-runtime-owned / locked: review_bundle_path, sandbox, routing, secrets.
+    # Derived: state_context (StaticPlanner). budget_slice may be omitted; runtime defaults apply.
     task_id: str = Field(default_factory=lambda: _new_id("task"))
     # Required for AGENT tasks; must be unset for runtime-owned kinds.
     role: AgentRole | None = None
@@ -334,6 +338,26 @@ class TaskGraphProposal(BaseModel):
     requires_human_approval: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("version", mode="before")
+    @classmethod
+    def _coerce_graph_version(cls, value: Any) -> Any:
+        """Graph revision is an int. LLMs often emit semver; take the major component.
+
+        Unknown shapes still fail — we do not invent a version.
+        """
+        if value is None or isinstance(value, bool):
+            raise ValueError("TaskGraph version must be a positive integer")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip().lstrip("vV")
+            major = text.split(".", 1)[0] if text else ""
+            if major.isdigit():
+                return int(major)
+        raise ValueError(f"TaskGraph version must be a positive integer, got {value!r}")
+
 
 class TaskGraphValidationResult(BaseModel):
     """Deterministic validator outcome. LLM cannot set `ok`."""
@@ -345,6 +369,31 @@ class TaskGraphValidationResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
     topo_order: list[str] = Field(default_factory=list)
     graph_hash: str | None = None
+
+
+class PlannerResolution(BaseModel):
+    """How the executable TaskGraph was chosen. Distinct from engineering_outcome.
+
+    LLM planner failure (rejected proposal) is not an engineering FAIL.
+    Recovered + PASS is a valid combined result.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    requested: str
+    accepted: bool
+    recovered: bool = False
+    fallback: str | None = None
+    fallback_profile: str | None = None
+    retry_count: int = 0
+    planner_attempts: int = 0
+    planner_rejections: int = 0
+    planner_fallbacks: int = 0
+    final_planner_type: str
+    rejection_reason: str | None = None
+    failure_class: str | None = None
+    validation_errors: list[str] = Field(default_factory=list)
+    rejected_proposal_hash: str | None = None
 
 
 class TaskExecutionRecord(BaseModel):
@@ -791,6 +840,10 @@ class SynthesisBundle(BaseModel):
     verified_results: list[dict[str, Any]] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
     provenance: list[str] = Field(default_factory=list)
+    # V2.8: locked scope / research diagnostics — LLM cannot invent these.
+    scope: dict[str, Any] | None = None
+    evidence_gaps: list[str] = Field(default_factory=list)
+    research_status: str | None = None
 
 
 class ComputationArtifact(BaseModel):
@@ -903,6 +956,11 @@ class RunManifest(BaseModel):
     # V2.6 engineering outcome (PASS/FAIL/INSUFFICIENT_EVIDENCE) — not run lifecycle.
     engineering_outcome: str | None = None
     calculation_spec_ids: list[str] = Field(default_factory=list)
+    # V2.7.2 planner reliability (LLM proposal vs deterministic recovery).
+    planner: dict[str, Any] | None = None
+    # V2.8 investigation scope snapshot (locked contract). Optional for older manifests.
+    investigation_scope: dict[str, Any] | None = None
+    original_problem_hash: str | None = None
 
 
 class GraphNode(BaseModel):
@@ -951,3 +1009,6 @@ class AdjudicationResult(BaseModel):
     evidence_completeness: dict[str, Any] | None = None
     # Engineering outcome may differ from run lifecycle COMPLETED.
     engineering_outcome: AdjudicationStatus | None = None
+    # V2.8 research sufficiency (optional). Synthesis must not override this.
+    research_sufficiency: dict[str, Any] | None = None
+    scope_status: str | None = None

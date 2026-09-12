@@ -424,4 +424,9 @@ class CursorSDKProvider:
             parts.append(f"## {msg.role.upper()}\n{msg.content}\n")
         if request.response_schema_name:
             parts.append(f"Schema name hint: {request.response_schema_name}")
+            # Cursor SDK has no enforced JSON schema; inject the closed-world contract.
+            if request.response_schema_name == "TaskGraphProposal":
+                from ai_lab.planner.schemas import planner_contract_text
+
+                parts.append(planner_contract_text())
         return "\n".join(parts)

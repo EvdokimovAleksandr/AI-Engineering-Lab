@@ -3,7 +3,11 @@
 LLM may **propose** work. It must not **execute** work.
 
 ```text
-Problem
+original_problem (immutable)
+  → Scope Resolution (orchestrator / Chief Engineer capability — not a new AgentRole)
+  → Clarification HITL if SCOPE_NEEDS_CLARIFICATION
+  → locked resolved_scope
+  → Task Router (uses resolved objective, not a fresh reinterpretation of the raw prompt)
   → Planner (StaticPlanner | LLMPlanner)
   → TaskGraphProposal          # untrusted
   → parse (forbidden fields)
@@ -12,6 +16,10 @@ Problem
   → approved TaskGraph
   → LabRuntime
 ```
+
+If scope is unresolved, LabRuntime does **not** build an execution TaskGraph.
+
+V2.7.2 planner recovery (invalid DAG → one LLM retry → StaticPlanner) is unchanged and is **not** the research query-refinement loop.
 
 `STAGE_ROLES` remains a **stage → roles table**. It is not the execution DAG. `StaticPlanner` compiles the default pipeline into a `TaskGraph`. `LabRuntime` loads that graph, validates it, then walks ready tasks.
 
@@ -101,10 +109,20 @@ Calls the LLM with schema `TaskGraphProposal`. System prompt states that `<UNTRU
 Pipeline:
 
 ```text
-LLM JSON → TaskGraphProposal → parse_proposal → validate_task_graph
-if not ok: stop
-LabRuntime.execute(graph)
+LLM JSON → parse → schema → TaskGraph validator → optional 1 retry → static recovery
 ```
+
+`LLMPlanner` is a **proposal generator**. The deterministic validator is the authority. Invalid proposals are never remapped (no `requirements_analyst → chief_engineer`). After at most one structured retry, recovery builds a new graph from the original problem + TaskRouter profile via `StaticPlanner` — the same validator, no bypass.
+
+Rejected AI plan ≠ failed engineering investigation. Provenance (`RunManifest.planner`, `planner.proposal_rejected` / `planner.recovered` events) records:
+
+```text
+requested=llm accepted=false fallback=static fallback_profile=standard
+```
+
+`manifest.task_graph_id` is always the **executed** valid graph, not the rejected proposal.
+
+Cursor SDK does not enforce a JSON schema; prompt + parse + validator + recovery are the contract.
 
 `follow_up_tasks` from Chief remain advisory and are **not** executed.
 

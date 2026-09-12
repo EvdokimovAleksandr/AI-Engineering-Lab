@@ -31,6 +31,9 @@ Problem → TaskRouter → workflow profile → Planner → validated TaskGraph
 - Engineering simulation (V2.5): `SimulationSpec` + `UniaxialTensionSolver` + Pint; synthetic tensile fixture is STUB, not FACT
 - Local task UI: `python -m ai_lab ui` → LabRuntime (no second orchestrator)
 - **V2.7** UI-first laboratory: projects/runs API, async runs, SSE event stream, structured result report (`python -m ai_lab ui --demo`)
+- **V2.7.1** run-scoped reports, gapless SSE subscribe/replay, `key_numbers` from accepted claims (synthesis cannot define quantitative truth)
+- **V2.7.2** planner reliability: closed-world roles, no role remapping, one LLM retry, StaticPlanner recovery via TaskRouter profile; planner RECOVERED ≠ engineering FAIL
+- **V2.8** investigation scoping: Scope Gate + HITL clarification + bounded research recovery; missing evidence ≠ assumption; provider error ≠ “no evidence”
 
 ## Knowledge (V2.1)
 

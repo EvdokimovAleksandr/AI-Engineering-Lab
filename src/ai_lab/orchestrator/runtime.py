@@ -19,9 +19,12 @@ from ai_lab.core.enums import (
     GraphEdgeType,
     GraphNodeType,
     ProjectState,
+    ResearchOutcome,
+    ScopeStatus,
     TaskKind,
     TaskStatus,
 )
+from ai_lab.core.investigation import InvestigationScope, ResearchSufficiencyReport
 from ai_lab.core.models import (
     AgentResult,
     HitlRequest,
@@ -57,13 +60,21 @@ from ai_lab.orchestrator.adjudication import adjudicate
 from ai_lab.orchestrator.budget import BudgetExceeded, budget_from_config, check_budget
 from ai_lab.orchestrator.hitl import HitlGate
 from ai_lab.orchestrator.iteration_policy import next_iteration_state
+from ai_lab.orchestrator.scope import (
+    apply_clarification,
+    hitl_request_for_scope,
+    lock_scope,
+    original_problem_hash,
+    resolve_scope,
+)
 from ai_lab.planner.context import ProblemContext
 from ai_lab.planner.dag import ready_task_ids
 from ai_lab.planner.factory import create_planner
 from ai_lab.planner.hashing import task_graph_hash
 from ai_lab.planner.iteration import graph_for_iteration
-from ai_lab.planner.pipeline import plan_and_validate
+from ai_lab.planner.pipeline import plan_with_recovery
 from ai_lab.planner.schemas import KNOWN_TOOL_NAMES, REVIEW_ROLES
+from ai_lab.planner.static import StaticPlanner
 from ai_lab.planner.validator import TaskGraphValidationContext, validate_task_graph
 from ai_lab.task_routing.models import RoutingDecision
 from ai_lab.task_routing.policy import task_routing_policy_from_config
@@ -171,6 +182,11 @@ class LabRuntime:
         self._task_routing_policy = task_routing_policy_from_config(config)
         # Tracks which UI stages already received stage.started (real graph, not fake timer).
         self._ui_stages_started: set[str] = set()
+        # Why the run stopped without an engineering result (budget / max iterations).
+        self.stop_reason: str | None = None
+        # V2.8 investigation scope (locked after the scope gate).
+        self._investigation_scope: InvestigationScope | None = None
+        self._last_research_sufficiency: ResearchSufficiencyReport | None = None
 
     def _stage_for_task(self, task: TaskSpec) -> str:
         """Map a TaskGraph node to a UI pipeline stage from real task metadata."""
@@ -268,6 +284,8 @@ class LabRuntime:
                 ),
                 "calculation_specs": list(getattr(self, "_calculation_specs", None) or []),
                 "relevance_results": list(getattr(self, "_relevance_results", None) or []),
+                "investigation_scope": self._investigation_scope,
+                "research_sufficiency": self._last_research_sufficiency,
             },
         )
 
@@ -282,6 +300,12 @@ class LabRuntime:
         extra = {}
         if self.problem_override is not None:
             extra["ui_problem.md"] = self.problem_override
+        original = problem_text
+        resolved = ""
+        if self._investigation_scope is not None:
+            original = self._investigation_scope.original_problem
+            resolved = self._investigation_scope.objective
+            extra["resolved_scope.json"] = self._investigation_scope.model_dump_json()
         return ProblemContext(
             project_id=self.project.name,
             run_id=self.run_id,
@@ -291,12 +315,209 @@ class LabRuntime:
             budget=self.budget,
             allowed_tools=tuple(sorted(KNOWN_TOOL_NAMES)),
             extra_data=extra,
+            original_problem=original,
+            resolved_objective=resolved,
         )
 
-    def _save_planner_state(self, *, proposal, graph: TaskGraph | None, validation) -> None:
+    def _original_problem_text(self) -> str:
+        """Immutable user prompt for this run (UI override or project problem.md)."""
+        orig_rel = self.run_store.rel("inputs", "original_problem.md")
+        orig_path = self.project.root / orig_rel
+        if orig_path.is_file():
+            return orig_path.read_text(encoding="utf-8")
+        text = self.problem_override
+        if text is None:
+            try:
+                text = self.project.read_text("problem.md")
+            except FileNotFoundError:
+                text = ""
+        if not str(text).strip():
+            logger.error("Cannot resolve scope: original problem is empty")
+            raise ValueError("original_problem is empty")
+        self.project.write_text(orig_rel, str(text))
+        return str(text)
+
+    def _persist_scope(self, scope: InvestigationScope) -> None:
+        self._investigation_scope = scope
+        payload = scope.model_dump(mode="json")
+        self.run_store.save_planner_json("scope.json", payload)
+        try:
+            manifest = self.run_store.load_manifest()
+            manifest.investigation_scope = payload
+            manifest.original_problem_hash = original_problem_hash(scope.original_problem)
+            self.run_store.save_manifest(manifest)
+        except FileNotFoundError:
+            logger.info("Scope saved as planner artifact (manifest not yet written)")
+
+    def _load_scope(self) -> InvestigationScope | None:
+        path = self.project.root / self.run_store.rel("planner", "scope.json")
+        if not path.is_file():
+            return None
+        import json as _json
+
+        return InvestigationScope.model_validate(_json.loads(path.read_text(encoding="utf-8")))
+
+    def _max_clarification_rounds(self) -> int:
+        return int(self.config.runtime.get("max_clarification_rounds", 2))
+
+    async def _resolve_and_gate_scope(self) -> InvestigationScope:
+        """Scope gate before TaskRouter/Planner. May raise _HitlInterrupt."""
+        original = self._original_problem_text()
+        prior = self._load_scope()
+        if prior is not None and prior.original_problem != original:
+            # Keep the first snapshot; UI/problem.md must not rewrite it mid-run.
+            original = prior.original_problem
+        self._emit_lifecycle("stage.started", stage="SCOPE_RESOLUTION")
+        scope = resolve_scope(
+            original,
+            prior=prior,
+            max_clarification_rounds=self._max_clarification_rounds(),
+        )
+        self._persist_scope(scope)
+        self._emit_lifecycle(
+            "scope.resolved",
+            stage="SCOPE_RESOLUTION",
+            status=scope.status.value,
+            locked=scope.locked,
+            objective=scope.objective,
+        )
+        while scope.status == ScopeStatus.SCOPE_NEEDS_CLARIFICATION:
+            req = hitl_request_for_scope(scope)
+            decision = self.hitl.request(req)
+            if not decision.approved:
+                self._emit_lifecycle(
+                    "scope.clarification_required",
+                    status="warn",
+                    stage="SCOPE_RESOLUTION",
+                    question=(scope.clarification.question if scope.clarification else req.reason),
+                )
+                raise _HitlInterrupt(req)
+            scope = apply_clarification(
+                scope,
+                choice=decision.choice,
+                note=decision.note,
+                answers=decision.answers,
+            )
+            scope = resolve_scope(
+                scope.original_problem,
+                prior=scope,
+                max_clarification_rounds=self._max_clarification_rounds(),
+            )
+            self._persist_scope(scope)
+        if scope.status in {ScopeStatus.SCOPE_RESOLVED, ScopeStatus.SCOPE_ASSUMED}:
+            scope = lock_scope(scope)
+            self._persist_scope(scope)
+            self._emit_lifecycle("stage.completed", stage="SCOPE_RESOLUTION")
+            return scope
+        if scope.status == ScopeStatus.SCOPE_UNRESOLVED:
+            self._emit_lifecycle(
+                "scope.unresolved",
+                status="warn",
+                stage="SCOPE_RESOLUTION",
+            )
+            raise _ScopeUnresolved(scope)
+        logger.error("Unexpected scope status %s", scope.status.value)
+        raise RuntimeError(f"Unexpected scope status {scope.status.value}")
+
+    def _resume_from_hitl(self, pending: dict) -> bool:
+        """Apply a stored HITL answer. Returns True if the run should continue.
+
+        Unknown/legacy pending payloads keep the old pause behaviour so existing
+        resume tests that seed a dummy HITL stay paused.
+        """
+        ctx = pending.get("context") if isinstance(pending, dict) else None
+        kind = ""
+        if isinstance(ctx, dict):
+            kind = str(ctx.get("kind") or "")
+        action = str(pending.get("requested_action") or "")
+        if kind != "scope_clarification" and action != "clarify_scope":
+            return False
+        req = HitlRequest.model_validate(pending) if pending.get("reason") else hitl_request_for_scope(
+            self._load_scope() or resolve_scope(self._original_problem_text())
+        )
+        decision = self.hitl.request(req)
+        if not decision.approved:
+            return False
+        prior = self._load_scope()
+        if prior is None:
+            prior = resolve_scope(self._original_problem_text())
+        prior = apply_clarification(
+            prior, choice=decision.choice, note=decision.note, answers=decision.answers
+        )
+        self._persist_scope(prior)
+        return True
+
+    def _finish_unresolved_scope(self, engine: WorkflowEngine, scope: InvestigationScope) -> None:
+        """Honest incomplete run: no TaskGraph, no invented FACT conclusion."""
+        from ai_lab.core.models import AdjudicationResult
+
+        reasons = [
+            f"scope_status={scope.status.value}",
+            scope.rationale or "Investigation scope could not be locked.",
+        ]
+        adj = AdjudicationResult(
+            status=AdjudicationStatus.INSUFFICIENT_EVIDENCE,
+            reasons=reasons,
+            scope_status=scope.status.value,
+        )
+        adj.engineering_outcome = adj.status
+        self._last_adjudication = adj
+        self.run_store.save_review_json("last_adjudication.json", adj.model_dump(mode="json"))
+        engine.set_state(ProjectState.COMPLETED)
+        self.project.save_snapshot(engine.snapshot)
+        self._write_scope_gated_report(scope, adj)
+
+    def _write_scope_gated_report(
+        self, scope: InvestigationScope, adj
+    ) -> None:
+        from ai_lab.orchestrator.synthesis import build_synthesis_bundle, render_final_report
+
+        bundle = build_synthesis_bundle(
+            claims=[],
+            verification=None,
+            red_team=None,
+            decisions=[],
+            adjudication=adj,
+            narrative="The laboratory could not lock a sufficiently specific investigation scope.",
+        )
+        bundle.scope = scope.model_dump(mode="json")
+        bundle.evidence_gaps = list(scope.ambiguity) + list(scope.unknown_parameters)
+        report = render_final_report(bundle)
+        self.project.write_text("final_report.md", report)
+        self.run_store.save_text("final_report.md", report)
+        self.run_store.save_review_json("synthesis_bundle.json", bundle.model_dump(mode="json"))
+
+    def _save_planner_state(
+        self,
+        *,
+        proposal,
+        graph: TaskGraph | None,
+        validation,
+        rejected_proposal=None,
+        rejected_validation=None,
+        resolution=None,
+    ) -> None:
         if proposal is not None:
             dump = proposal.model_dump(mode="json") if hasattr(proposal, "model_dump") else proposal
             self.run_store.save_planner_json("proposal.json", dump)
+        if rejected_proposal is not None:
+            dump = (
+                rejected_proposal.model_dump(mode="json")
+                if hasattr(rejected_proposal, "model_dump")
+                else rejected_proposal
+            )
+            self.run_store.save_planner_json("rejected_proposal.json", dump)
+        if rejected_validation is not None:
+            self.run_store.save_planner_json(
+                "rejected_validation.json", rejected_validation.model_dump(mode="json")
+            )
+        if resolution is not None:
+            payload = resolution.model_dump(mode="json") if hasattr(resolution, "model_dump") else resolution
+            self.run_store.save_planner_json("resolution.json", payload)
+            try:
+                self.run_store.attach_planner(payload)
+            except FileNotFoundError:
+                logger.info("Planner resolution saved as artifact (manifest not yet written)")
         if graph is not None:
             payload = graph.model_dump(mode="json")
             self.run_store.save_planner_json("task_graph.json", payload)
@@ -396,15 +617,28 @@ class LabRuntime:
         # Route on the posed problem, not scaffold requirements/assumptions —
         # those can pollute classification when UI overrides problem.md.
         full_ctx = self._problem_context()
+        scope = self._investigation_scope
+        # Locked scope drives routing: objective + key terms + original (immutable) keywords.
+        # Objective alone can hyphenate terms ("spider-silk") and miss classifier phrases.
+        parts = [
+            full_ctx.resolved_objective,
+            " ".join(scope.key_terms) if scope is not None else "",
+            full_ctx.original_problem or full_ctx.problem_text,
+        ]
+        extra = {}
+        if scope is not None and scope.pipeline_hint:
+            extra["pipeline_hint"] = scope.pipeline_hint
         route_ctx = ProblemContext(
             project_id=full_ctx.project_id,
             run_id=full_ctx.run_id,
-            problem_text=full_ctx.problem_text,
+            problem_text="\n".join(p for p in parts if p),
             requirements_text="",
             assumptions_text="",
             budget=full_ctx.budget,
             allowed_tools=full_ctx.allowed_tools,
-            extra_data={},
+            extra_data=extra,
+            original_problem=full_ctx.original_problem,
+            resolved_objective=full_ctx.resolved_objective,
         )
         decision = router.route(route_ctx)
         self._routing_decision = decision
@@ -433,7 +667,8 @@ class LabRuntime:
         return decision
 
     async def _prepare_task_graph(self) -> TaskGraph:
-        """Router (optional) → planner proposes; only a validated DAG is executed."""
+        """Scope gate → Router (optional) → planner proposes; only a validated DAG is executed."""
+        await self._resolve_and_gate_scope()
         self._route_task()
         pipeline_override = self._resolve_pipeline_for_planner()
         planner = create_planner(
@@ -446,10 +681,52 @@ class LabRuntime:
             independence_policy=self.independence_policy,
             available_providers=KNOWN_PROVIDER_IDS,
         )
-        proposal, graph, validation = await plan_and_validate(
-            planner, context, validation_context=vctx
+        # Fallback profile follows TaskRouter, not a hardcoded STANDARD graph.
+        fallback_pipeline = pipeline_override or str(
+            (self.config.simulation or {}).get("pipeline") or "default"
+        ).strip().lower()
+        fallback_planner = None
+        if getattr(planner, "name", None) == "llm":
+            fallback_planner = StaticPlanner(pipeline=fallback_pipeline)
+        outcome = await plan_with_recovery(
+            planner,
+            context,
+            validation_context=vctx,
+            fallback_planner=fallback_planner,
+            fallback_profile=fallback_pipeline,
         )
-        self._save_planner_state(proposal=proposal, graph=graph, validation=validation)
+        resolution = outcome.resolution
+        if outcome.rejected_validation is not None:
+            self._emit_lifecycle(
+                "planner.proposal_rejected",
+                status="warn",
+                planner=resolution.requested,
+                reason=resolution.rejection_reason,
+                failure_class=resolution.failure_class,
+                validation_errors=list(resolution.validation_errors),
+                fallback=resolution.fallback,
+                fallback_profile=resolution.fallback_profile,
+                retry_count=resolution.retry_count,
+            )
+        if resolution.recovered:
+            self._emit_lifecycle(
+                "planner.recovered",
+                status="ok",
+                fallback="static",
+                fallback_profile=resolution.fallback_profile,
+                final_planner=resolution.final_planner_type,
+            )
+        self._save_planner_state(
+            proposal=outcome.proposal,
+            graph=outcome.graph,
+            validation=outcome.validation,
+            rejected_proposal=outcome.rejected_proposal,
+            rejected_validation=outcome.rejected_validation,
+            resolution=resolution,
+        )
+        graph = outcome.graph
+        validation = outcome.validation
+        proposal = outcome.proposal
         if not validation.ok or graph is None:
             logger.error(
                 "TaskGraph rejected: %s %s",
@@ -668,6 +945,14 @@ class LabRuntime:
                     self._last_verification = result.verification
                 if task.role == AgentRole.RED_TEAM:
                     self._last_red_team = result.red_team
+                if task.role == AgentRole.RESEARCH:
+                    suff = (result.raw or {}).get("research_sufficiency")
+                    if suff:
+                        self._last_research_sufficiency = ResearchSufficiencyReport.model_validate(suff)
+                        self.run_store.save_review_json(
+                            "research_sufficiency.json",
+                            self._last_research_sufficiency.model_dump(mode="json"),
+                        )
             self._task_statuses[task.task_id] = TaskStatus.SUCCESS
             self._executions.append(
                 TaskExecutionRecord(
@@ -799,7 +1084,18 @@ class LabRuntime:
             self._routing_decision is not None
             and not self._routing_decision.require_independent_review
         )
-        if simple_path:
+        # V2.8: bounded research recovery already ran. Iterating the TaskGraph cannot
+        # invent sources; complete with an honest INSUFFICIENT/PARTIAL report.
+        research_terminal = False
+        rs = self._last_research_sufficiency
+        if rs is not None and rs.research_required:
+            research_terminal = rs.outcome in {
+                ResearchOutcome.RESEARCH_EMPTY,
+                ResearchOutcome.RESEARCH_FILTERED,
+                ResearchOutcome.RESEARCH_PARTIAL,
+                ResearchOutcome.RESEARCH_PROVIDER_ERROR,
+            }
+        if simple_path or research_terminal:
             # Leave synthesis PENDING so grounded (non-PASS) report is written.
             return
 
@@ -1135,6 +1431,17 @@ class LabRuntime:
             understanding_outputs, understanding_dims = extract_outputs_from_understanding(
                 understanding
             )
+        if self._investigation_scope is not None and self._investigation_scope.required_outputs:
+            # Locked scope cannot be weakened by later LLM understanding.
+            understanding_outputs = list(
+                dict.fromkeys(
+                    [*self._investigation_scope.required_outputs, *understanding_outputs]
+                )
+            )
+            understanding_dims = {
+                **understanding_dims,
+                **self._investigation_scope.expected_dimensions,
+            }
         policy = VerificationPolicy(
             verification_required=require_verification,
             calculation_required=require_calculation,
@@ -1201,6 +1508,10 @@ class LabRuntime:
             require_red_team=require_rt,
             evidence_completeness=completeness,
             verification_required=require_verification,
+            research_sufficiency=self._last_research_sufficiency,
+            scope_status=(
+                self._investigation_scope.status.value if self._investigation_scope else None
+            ),
         )
         adj.routing_policy_version = self.routing_policy.version
         adj.model_routing = {
@@ -1376,6 +1687,22 @@ class LabRuntime:
         steps = 0
 
         try:
+            if engine.state == ProjectState.AWAITING_HUMAN and self._is_resume:
+                pending = engine.snapshot.pending_hitl or {}
+                continued = self._resume_from_hitl(pending)
+                if continued:
+                    engine.snapshot.pending_hitl = None
+                    engine.set_state(ProjectState.UNDERSTANDING)
+                    self.project.save_snapshot(engine.snapshot)
+                else:
+                    self._persist_finish_manifest(final_state=engine.snapshot.state.value)
+                    self._emit_lifecycle(
+                        "run.completed",
+                        final_state=engine.snapshot.state.value,
+                        hitl_required=True,
+                    )
+                    return engine.snapshot
+
             if engine.state != ProjectState.AWAITING_HUMAN:
                 try:
                     await self._prepare_task_graph()
@@ -1398,6 +1725,15 @@ class LabRuntime:
                                 else None
                             ),
                         )
+                except _ScopeUnresolved as scope_exc:
+                    self._finish_unresolved_scope(engine, scope_exc.scope)
+                    self._persist_finish_manifest(final_state=engine.snapshot.state.value)
+                    self._emit_lifecycle(
+                        "run.completed",
+                        final_state=engine.snapshot.state.value,
+                        engineering_outcome=AdjudicationStatus.INSUFFICIENT_EVIDENCE.value,
+                    )
+                    return engine.snapshot
                 except _HitlInterrupt as hitl_exc:
                     engine.snapshot.pending_hitl = hitl_exc.request.model_dump(mode="json")
                     engine.set_state(ProjectState.AWAITING_HUMAN)
@@ -1432,6 +1768,7 @@ class LabRuntime:
                     break
                 except BudgetExceeded as exc:
                     logger.error("Budget exceeded: %s", exc)
+                    self.stop_reason = str(exc)
                     engine.set_state(ProjectState.BUDGET_EXCEEDED)
                     self.project.save_snapshot(engine.snapshot)
                     break
@@ -1445,11 +1782,13 @@ class LabRuntime:
 
         except BudgetExceeded as exc:
             logger.error("Budget exceeded: %s", exc)
+            self.stop_reason = str(exc)
             engine.set_state(ProjectState.BUDGET_EXCEEDED)
             self.project.save_snapshot(engine.snapshot)
 
         if steps >= max_iter and not engine.is_terminal():
             logger.error("Max iterations reached (%s); stopping", max_iter)
+            self.stop_reason = f"max_iterations exceeded: {steps}>{max_iter}"
             engine.set_state(ProjectState.BUDGET_EXCEEDED)
             self.project.save_snapshot(engine.snapshot)
 
@@ -1473,6 +1812,7 @@ class LabRuntime:
             final_state=engine.snapshot.state.value,
             engineering_outcome=outcome,
             hitl_required=engine.snapshot.state == ProjectState.AWAITING_HUMAN,
+            stop_reason=self.stop_reason,
         )
         return engine.snapshot
 
@@ -1481,6 +1821,14 @@ class _HitlInterrupt(Exception):
     def __init__(self, request: HitlRequest) -> None:
         super().__init__(request.reason)
         self.request = request
+
+
+class _ScopeUnresolved(Exception):
+    """Scope gate exhausted clarification budget — not a planner/runtime crash."""
+
+    def __init__(self, scope: InvestigationScope) -> None:
+        super().__init__(scope.status.value)
+        self.scope = scope
 
 
 def repo_root_from_here() -> Path:

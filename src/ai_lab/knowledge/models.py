@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from ai_lab.core.enums import (
     ConflictStatus,
     EvidenceStrength,
+    ResearchOutcome,
     SourceKind,
     SourceTrustTier,
     TrustLevel,
@@ -192,6 +193,11 @@ class ResearchResult(BaseModel):
     evidence: list[EvidenceRecord] = Field(default_factory=list)
     findings: list[ResearchFinding] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # V2.8 diagnostic — default None so older fixtures still load.
+    outcome: ResearchOutcome | None = None
+    parent_query: str | None = None
+    strategy: str | None = None
+    reason: str | None = None
 
     def provenance_rows(self) -> list[dict[str, Any]]:
         """Flatten Claim-ready provenance: evidence → source → uri/hash/query."""

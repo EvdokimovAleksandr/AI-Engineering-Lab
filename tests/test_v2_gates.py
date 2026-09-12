@@ -240,6 +240,15 @@ def test_run_budget_stops_runaway() -> None:
         record_agent_call(budget)
 
 
+def test_budget_violation_message_tokens() -> None:
+    from ai_lab.orchestrator.budget import budget_violation_message
+
+    budget = RunBudget(max_tokens=500_000, tokens_used=540_236)
+    assert budget_violation_message(budget, include_runtime=False) == (
+        "max_tokens exceeded: 540236>500000"
+    )
+
+
 def test_review_bundle_hides_author_confidence() -> None:
     claim = Claim(
         statement="x",
@@ -323,6 +332,7 @@ async def test_tool_output_marked_untrusted(tmp_path: Path) -> None:
 
 def test_cursor_provider_reasoning_only_ignores_project_cwd(tmp_path: Path, monkeypatch) -> None:
     """Cursor must not bind cwd to project root (FS escape past ToolRegistry)."""
+    pytest.importorskip("cursor_sdk")
     monkeypatch.setenv("CURSOR_API_KEY", "test-key-not-real")
     project = tmp_path / "project"
     project.mkdir()

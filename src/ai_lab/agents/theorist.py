@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ai_lab.agents.base import AgentContext, BaseAgent, coerce_str_list, llm_json
+from ai_lab.agents.base import AgentContext, BaseAgent, coerce_optional_str, coerce_str_list, llm_json
 from ai_lab.core.enums import AgentRole, EvidenceKind
 from ai_lab.core.models import AgentResult, Claim, ConfidenceBreakdown, Hypothesis, TaskSpec
 
@@ -36,7 +36,7 @@ class TheoristAgent(BaseAgent):
                 kind=EvidenceKind(item.get("kind", EvidenceKind.INFERENCE.value))
                 if item.get("kind") in EvidenceKind._value2member_map_
                 else EvidenceKind.INFERENCE,
-                evidence=item.get("evidence"),
+                evidence=coerce_optional_str(item.get("evidence")),
                 assumptions=coerce_str_list(item.get("assumptions")),
                 falsifiers=coerce_str_list(item.get("falsifiers")),
                 agent_id=self.role.value,

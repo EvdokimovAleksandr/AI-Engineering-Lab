@@ -52,6 +52,8 @@ runtime:
   hitl_on_plan: false
   planner: static  # static | llm — LLM proposes only; validator is authoritative
   parallel_independent_groups: true
+  # V2.8: max user questions per run (existing HITL; not a second questionnaire system).
+  max_clarification_rounds: 2
   budget:
     max_iterations: 24
     max_agent_calls: 100
@@ -146,6 +148,8 @@ research:
     max_content_bytes: 200000
     timeout_seconds: 15
     max_evidence_per_source: 3
+  # V2.8: bounded research recovery (not an infinite search loop).
+  max_refinements: 2
 
 # V2.5 trusted simulation policy. LLM/UI cannot add solvers or raise limits.
 simulation:

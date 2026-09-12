@@ -12,6 +12,7 @@ from ai_lab.core.enums import (
     AdjudicationStatus,
     AgreementType,
     AttackSeverity,
+    ResearchOutcome,
     VerificationStatus,
 )
 from ai_lab.core.models import (
@@ -21,6 +22,7 @@ from ai_lab.core.models import (
     RedTeamReport,
     VerificationReport,
 )
+from ai_lab.core.investigation import ResearchSufficiencyReport
 
 
 def adjudicate(
@@ -32,6 +34,8 @@ def adjudicate(
     require_red_team: bool = True,
     evidence_completeness: EvidenceCompletenessReport | None = None,
     verification_required: bool = True,
+    research_sufficiency: ResearchSufficiencyReport | None = None,
+    scope_status: str | None = None,
 ) -> AdjudicationResult:
     """Combine gates. Profile may waive V/RT only when TaskRouter policy says so.
 
@@ -67,6 +71,26 @@ def adjudicate(
             red_team_max_severity=rt_sev,
             deterministic_critical_failure=True,
             agreement_type=AgreementType.INDEPENDENT_EVIDENCE,
+        )
+        result.engineering_outcome = result.status
+        if evidence_completeness is not None:
+            result.evidence_completeness = evidence_completeness.model_dump(mode="json")
+        return result
+
+    sr_reasons = _scope_research_gate(research_sufficiency, scope_status)
+    if sr_reasons:
+        reasons.extend(sr_reasons)
+        result = AdjudicationResult(
+            status=AdjudicationStatus.INSUFFICIENT_EVIDENCE,
+            reasons=reasons,
+            verification_status=v_status,
+            red_team_max_severity=rt_sev,
+            deterministic_critical_failure=False,
+            agreement_type=AgreementType.MIXED,
+            research_sufficiency=(
+                research_sufficiency.model_dump(mode="json") if research_sufficiency else None
+            ),
+            scope_status=scope_status,
         )
         result.engineering_outcome = result.status
         if evidence_completeness is not None:
@@ -233,3 +257,41 @@ def adjudicate(
     if evidence_completeness is not None:
         result.evidence_completeness = evidence_completeness.model_dump(mode="json")
     return result
+
+
+def _scope_research_gate(
+    research_sufficiency: ResearchSufficiencyReport | None,
+    scope_status: str | None,
+) -> list[str]:
+    """Block PASS when scope is unlocked or required research evidence is missing.
+
+    Provider errors are not “no evidence exists”. Missing evidence is not an assumption.
+    """
+    reasons: list[str] = []
+    if scope_status in {"SCOPE_UNRESOLVED", "SCOPE_NEEDS_CLARIFICATION"}:
+        reasons.append(f"scope_status={scope_status}: investigation is not answerable yet")
+    if research_sufficiency is None:
+        return reasons
+    if not research_sufficiency.research_required:
+        if research_sufficiency.outcome == ResearchOutcome.RESEARCH_PROVIDER_ERROR:
+            reasons.append(
+                "RESEARCH_PROVIDER_ERROR: search failed; this is not evidence of absence"
+            )
+        return reasons
+    if research_sufficiency.outcome == ResearchOutcome.RESEARCH_PROVIDER_ERROR:
+        reasons.append(
+            "RESEARCH_PROVIDER_ERROR: provider failure cannot justify a scientific conclusion"
+        )
+    elif research_sufficiency.outcome == ResearchOutcome.RESEARCH_EMPTY:
+        reasons.append("RESEARCH_EMPTY: no sources retrieved after bounded refinement")
+    elif research_sufficiency.outcome == ResearchOutcome.RESEARCH_FILTERED:
+        reasons.append("RESEARCH_FILTERED: hits existed but none were relevant to locked scope")
+    elif research_sufficiency.outcome == ResearchOutcome.RESEARCH_PARTIAL:
+        reasons.append(
+            f"RESEARCH_PARTIAL: coverage {research_sufficiency.covered_count}/"
+            f"{research_sufficiency.required_count}"
+        )
+    if research_sufficiency.evidence_gaps and research_sufficiency.outcome != ResearchOutcome.RESEARCH_SUCCESS:
+        reasons.append("evidence_gaps: " + "; ".join(research_sufficiency.evidence_gaps[:8]))
+    return reasons
+

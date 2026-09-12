@@ -52,6 +52,35 @@ def coerce_str_list(values: Any, *, limit: int | None = None) -> list[str]:
     return out
 
 
+def coerce_optional_str(value: Any, *, limit: int = 8) -> str | None:
+    """Normalize an LLM scalar that Claim stores as a single string.
+
+    Live providers often emit ``evidence`` as a list of notes. ``dict``/list
+    must not reach Pydantic ``str | None`` (that aborts the whole run).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, list):
+        parts = coerce_str_list(value, limit=limit)
+        if not parts:
+            return None
+        return "; ".join(parts)
+    if isinstance(value, dict):
+        text = str(
+            value.get("statement")
+            or value.get("text")
+            or value.get("evidence")
+            or value.get("description")
+            or ""
+        ).strip()
+        return text or None
+    text = str(value).strip()
+    return text or None
+
+
 @dataclass
 class AgentContext:
     """Runtime dependencies injected into every agent."""

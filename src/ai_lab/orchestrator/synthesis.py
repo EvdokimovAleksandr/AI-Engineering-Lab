@@ -210,6 +210,41 @@ def render_final_report(bundle: SynthesisBundle, *, llm_polish: dict | None = No
     elif summary:
         lines += ["## Narrative (non-authoritative)", summary, ""]
 
+    if bundle.scope:
+        orig = bundle.scope.get("original_problem") or ""
+        obj = bundle.scope.get("objective") or ""
+        status = bundle.scope.get("status") or ""
+        rationale = bundle.scope.get("rationale") or ""
+        lines += ["## Scope"]
+        lines.append(f"- Status: `{status}`")
+        if orig:
+            preview = orig.strip().split("\n", 1)[0][:240]
+            lines.append(f"- Original question: {preview}")
+        if obj:
+            lines.append(f"- Resolved objective: {obj}")
+        if rationale:
+            lines.append(f"- Reason: {rationale}")
+        clar = bundle.scope.get("clarifications") or []
+        if clar:
+            lines.append("- Clarification provided by user")
+        lines.append("")
+
+    assumptions = []
+    if bundle.scope:
+        assumptions = list(bundle.scope.get("assumptions") or [])
+    lines += ["## Assumptions"]
+    if assumptions:
+        for item in assumptions:
+            if isinstance(item, dict):
+                kind = item.get("kind") or "ASSUMPTION"
+                text = item.get("text") or ""
+                lines.append(f"- ({kind}) {text}")
+            else:
+                lines.append(f"- {item}")
+    else:
+        lines.append("- _(none)_")
+    lines.append("")
+
     lines += ["## Verified results"]
     results = bundle.verified_results or bundle.accepted_claims
     if results:
@@ -285,6 +320,16 @@ def render_final_report(bundle: SynthesisBundle, *, llm_polish: dict | None = No
         lines.append(f"- {q}")
     if not bundle.open_questions and not bundle.caveats:
         lines.append("- _(none)_")
+    lines.append("")
+
+    lines += ["## Evidence gaps"]
+    if bundle.evidence_gaps:
+        for g in bundle.evidence_gaps:
+            lines.append(f"- {g}")
+    else:
+        lines.append("- _(none)_")
+    if bundle.research_status:
+        lines.append(f"- research_status: `{bundle.research_status}`")
     lines.append("")
 
     lines += [

@@ -15,9 +15,9 @@ from ai_lab.llm.config import apply_provider_override
 from ai_lab.memory.project_store import ProjectStore
 from ai_lab.observability.tracing import RunEventSink
 from ai_lab.orchestrator.hitl import HitlGate
-from ai_lab.orchestrator.runtime import LabRuntime, repo_root_from_here
+from ai_lab.orchestrator.runtime import LabRuntime, _HitlInterrupt, repo_root_from_here
 from ai_lab.sandbox.models import FORBIDDEN_COMPUTE_KEYS
-from ai_lab.ui.jobs import get_job, read_lifecycle, start_run_job
+from ai_lab.ui.jobs import get_job, read_lifecycle, resume_run_job, start_run_job
 from ai_lab.ui.report import (
     build_result_view,
     build_run_summary,
@@ -49,6 +49,7 @@ FORBIDDEN_UI_KEYS = FORBIDDEN_COMPUTE_KEYS | frozenset(
         "docker_host",
         "solver_import",
         "privileged",
+        "simulation_fixture",
     }
 )
 
@@ -223,11 +224,13 @@ def create_run(
     projects_dir: Path | None = None,
     config: LabConfig | None = None,
     wait: bool | None = None,
+    simulation_fixture: str | None = None,
 ) -> dict[str, Any]:
     """Create a plan or execute via LabRuntime. Payload is UNTRUSTED_DATA.
 
     wait=True (default for direct callers / tests): block until finished.
     wait=False (HTTP UI): return RUNNING immediately and continue in background.
+    simulation_fixture is a programmatic test hook only — never accepted from UI JSON.
     """
     if not isinstance(payload, dict):
         raise UiApiError("JSON object required")
@@ -337,7 +340,25 @@ def create_run(
             model_id=next(iter(cfg.models.values()), "unknown"),
         )
         runtime.project.write_text(runtime.run_store.rel("inputs", "ui_problem.md"), problem)
-        graph = _run_async(runtime._prepare_task_graph())
+        try:
+            graph = _run_async(runtime._prepare_task_graph())
+        except _HitlInterrupt as exc:
+            # Plan preview cannot invent an execution graph for an unanswerable question.
+            snap = runtime.project.load_snapshot()
+            snap.run_id = runtime.run_id
+            snap.state = ProjectState.AWAITING_HUMAN
+            snap.pending_hitl = exc.request.model_dump(mode="json")
+            runtime.project.save_snapshot(snap)
+            runtime.run_store.finish_manifest(final_state="AWAITING_HUMAN")
+            return {
+                "run_id": runtime.run_id,
+                "project_id": project_id,
+                "action": "plan",
+                "state": "AWAITING_HUMAN",
+                "status": "AWAITING_HUMAN",
+                "hitl_required": True,
+                "hitl": snap.pending_hitl,
+            }
         runtime.run_store.finish_manifest(final_state="PLANNED")
         return {
             "run_id": runtime.run_id,
@@ -350,7 +371,13 @@ def create_run(
         }
 
     if not wait:
-        job = start_run_job(store=store, config=cfg, repo_root=root, problem=problem)
+        job = start_run_job(
+            store=store,
+            config=cfg,
+            repo_root=root,
+            problem=problem,
+            simulation_fixture=simulation_fixture,
+        )
         return {
             "run_id": job.run_id,
             "project_id": project_id,
@@ -366,6 +393,7 @@ def create_run(
         repo_root=root,
         hitl=HitlGate(auto_approve=False),
         problem_override=problem,
+        simulation_fixture=simulation_fixture,
     )
     snapshot = _run_async(runtime.run())
     return {
@@ -473,6 +501,7 @@ def get_status(
         "final_state": manifest.get("final_state"),
         "adjudication_status": snapshot.adjudication_status.value if snapshot.adjudication_status else None,
         "error": summary.get("error"),
+        "planner": summary.get("planner"),
     }
 
 
@@ -484,11 +513,13 @@ def get_result(
     life = read_lifecycle(store, run_id)
     view = build_result_view(store, run_id, manifest=manifest, lifecycle=life)
     # Keep V2.5 keys used by older tests while exposing structured report.
+    # Reviews/reports for this DTO are run-scoped (see build_result_view); do not
+    # re-read project-root reviews/final_report.md — those are last-writer-wins.
     snapshot = store.load_snapshot()
-    sim = _load_run_json(store, run_id, "artifacts", "simulation_result.json")
-    ver = store.root / "reviews" / "last_verification.json"
-    rt = store.root / "reviews" / "last_red_team.json"
-    adj = store.root / "reviews" / "last_adjudication.json"
+    sim = view.get("simulation") or _load_run_json(store, run_id, "artifacts", "simulation_result.json")
+    verification = view.get("verification") if isinstance(view.get("verification"), dict) else {}
+    red_team = view.get("red_team")
+    adjudication = view.get("adjudication") if isinstance(view.get("adjudication"), dict) else {}
     return {
         **view,
         "state": snapshot.state.value,
@@ -496,17 +527,17 @@ def get_result(
         "task_graph_status": manifest.get("final_state"),
         "simulation_status": (sim or {}).get("status") if isinstance(sim, dict) else None,
         "simulation": sim if view.get("simulation") is None else view.get("simulation"),
-        "verification_status": _json_status(ver, "status"),
-        "red_team_status": _json_file(rt),
-        "adjudication_status": _json_status(adj, "status") or view.get("engineering_outcome"),
-        "conclusion": view.get("synthesis")
-        or _json_file(store.root / "reviews" / "synthesis_bundle.json"),
+        "verification_status": verification.get("status") if verification else None,
+        "red_team_status": red_team,
+        "adjudication_status": (adjudication.get("status") if adjudication else None)
+        or view.get("engineering_outcome"),
+        "conclusion": view.get("synthesis"),
         "links": view.get("provenance", {}).get("links")
         or {
             "task_graph": f".runs/{run_id}/planner/task_graph.json",
             "evidence": "knowledge/graph.json",
             "computation": f".runs/{run_id}/computations/",
-            "verification": "reviews/last_verification.json",
+            "verification": f".runs/{run_id}/reviews/last_verification.json",
         },
     }
 
@@ -539,6 +570,57 @@ def get_event_sink(
     if job is not None and job.sink is not None:
         return job.sink
     return _events_sink(root, run_id, store)
+
+
+def resume_run(
+    run_id: str,
+    payload: dict[str, Any],
+    *,
+    repo_root: Path | None = None,
+    projects_dir: Path | None = None,
+    config: LabConfig | None = None,
+) -> dict[str, Any]:
+    """POST /api/runs/{id}/resume — continue the same investigation after HITL."""
+    if not isinstance(payload, dict):
+        raise UiApiError("JSON object required")
+    extra = set(payload) - {"choice", "note", "answers", "wait"}
+    if extra:
+        raise UiApiError(f"Unsupported UI fields: {sorted(extra)}")
+    choice = payload.get("choice")
+    if choice is not None and not isinstance(choice, str):
+        raise UiApiError("choice must be a string")
+    note = payload.get("note") or ""
+    if not isinstance(note, str):
+        raise UiApiError("note must be a string")
+    answers = payload.get("answers")
+    if answers is not None and not isinstance(answers, dict):
+        raise UiApiError("answers must be an object")
+    if answers:
+        answers = {str(k): str(v) for k, v in answers.items()}
+    root = repo_root or _repo_root()
+    store, _manifest = _find_run(run_id, repo_root=root, projects_dir=projects_dir)
+    snapshot = store.load_snapshot()
+    if snapshot.state != ProjectState.AWAITING_HUMAN:
+        raise UiApiError("Run is not waiting for a human answer", status=409)
+    cfg = config or load_config(root / "config" / "default.yaml")
+    cfg = apply_provider_override(cfg, cfg.provider)
+    job = resume_run_job(
+        store=store,
+        config=cfg,
+        repo_root=root,
+        run_id=run_id,
+        choice=choice,
+        note=note,
+        answers=answers,
+    )
+    return {
+        "run_id": job.run_id,
+        "project_id": store.name,
+        "action": "resume",
+        "state": "RUNNING",
+        "status": "RUNNING",
+        "hitl_required": False,
+    }
 
 
 def export_result(
@@ -618,17 +700,6 @@ def _load_json(path: Path) -> Any | None:
     if not path.is_file():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _json_file(path: Path) -> Any | None:
-    return _load_json(path)
-
-
-def _json_status(path: Path, key: str) -> Any | None:
-    data = _json_file(path)
-    if isinstance(data, dict):
-        return data.get(key)
-    return None
 
 
 def _load_project_meta(root: Path) -> dict[str, Any]:

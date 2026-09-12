@@ -96,6 +96,17 @@ INDEX_HTML = """<!DOCTYPE html>
     }
     button:disabled { opacity: .5; cursor: not-allowed; }
     .hint { font-size: .85rem; color: var(--muted); margin-top: .75rem; }
+    .hitl-box {
+      margin-top: 1rem; padding: 1rem 1.1rem;
+      border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+      background: color-mix(in srgb, var(--warn) 10%, var(--bg-elev));
+      border-radius: 12px;
+    }
+    .hitl-box h3 { color: var(--warn); text-transform: none; letter-spacing: 0; font-size: 1rem; }
+    .hitl-box .opts { display: flex; flex-direction: column; gap: .45rem; margin: .75rem 0; }
+    .hitl-box label { display: flex; gap: .55rem; align-items: flex-start; cursor: pointer; }
+    .hitl-box textarea { min-height: 5rem; margin-top: .5rem; }
+    .pipeline li.hitl::before { background: var(--warn); }
     .list { list-style: none; padding: 0; margin: 1.5rem 0 0; }
     .list li {
       display: flex; justify-content: space-between; gap: 1rem; align-items: center;
@@ -190,6 +201,12 @@ INDEX_HTML = """<!DOCTYPE html>
       background: color-mix(in srgb, var(--bad) 10%, transparent);
       border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem;
     }
+    .warn-box {
+      border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+      background: color-mix(in srgb, var(--warn) 10%, transparent);
+      border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem;
+    }
+    .warn-box h3 { color: var(--warn); text-transform: none; letter-spacing: 0; font-size: 1rem; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
     .field-label {
       display: flex; align-items: center; gap: .35rem;
@@ -301,6 +318,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
   const STAGE_RU = {
     UNDERSTANDING: 'Понимание задачи',
+    SCOPE_RESOLUTION: 'Постановка задачи',
     DECOMPOSITION: 'Декомпозиция',
     RESEARCH: 'Исследование',
     HYPOTHESIS: 'Гипотезы',
@@ -330,6 +348,15 @@ INDEX_HTML = """<!DOCTYPE html>
     INSUFFICIENT_EVIDENCE: 'НЕДОСТАТОЧНО ДОКАЗАТЕЛЬСТВ',
     DISPUTED: 'СПОРНО',
     WARN: 'ВНИМАНИЕ',
+    RESEARCH_EMPTY: 'ПУСТОЙ ПОИСК',
+    RESEARCH_PARTIAL: 'ЧАСТИЧНОЕ ПОКРЫТИЕ',
+    RESEARCH_PROVIDER_ERROR: 'ОШИБКА ПРОВАЙДЕРА',
+    RESEARCH_FILTERED: 'ОТФИЛЬТРОВАНО',
+    RESEARCH_SUCCESS: 'ПОИСК УСПЕШЕН',
+    SCOPE_RESOLVED: 'ПОСТАНОВКА ЗАФИКСИРОВАНА',
+    SCOPE_NEEDS_CLARIFICATION: 'НУЖНО УТОЧНЕНИЕ',
+    SCOPE_UNRESOLVED: 'ПОСТАНОВКА НЕ ЗАФИКСИРОВАНА',
+    HITL: 'НУЖНО УТОЧНЕНИЕ',
     AWAITING_HUMAN: 'НУЖНО РЕШЕНИЕ ЧЕЛОВЕКА',
     FAIL: 'ПРОВАЛ',
     FAILED: 'ОШИБКА',
@@ -389,7 +416,7 @@ INDEX_HTML = """<!DOCTYPE html>
     const s = String(status || '').toUpperCase();
     if (['PASS', 'SUPPORTED', 'SUCCESS', 'DONE', 'COMPLETED', 'VERIFIED', 'OK'].includes(s)) return 'ok';
     if (['RUNNING', 'PARTIAL', 'PENDING', 'PLANNED'].includes(s)) return 'run';
-    if (['INSUFFICIENT_EVIDENCE', 'DISPUTED', 'WARN', 'AWAITING_HUMAN'].includes(s)) return 'warn';
+    if (['INSUFFICIENT_EVIDENCE', 'DISPUTED', 'WARN', 'AWAITING_HUMAN', 'RECOVERED'].includes(s)) return 'warn';
     if (['FAIL', 'FAILED', 'ERROR', 'BAD'].includes(s)) return 'bad';
     return 'muted';
   }
@@ -405,6 +432,30 @@ INDEX_HTML = """<!DOCTYPE html>
 
   function esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function planningBanner(planner) {
+    if (!planner || !planner.status) return '';
+    if (planner.status === 'RECOVERED') {
+      const errors = (planner.validation_errors || []).slice(0, 6).map(e => `<li>${esc(e)}</li>`).join('');
+      return `<div class="warn-box" id="planning-banner">
+        <h3>⚠ Предложение AI-планировщика отклонено ${tip('Это сбой планирования, не инженерный FAIL. Исследование продолжено детерминированным планом.')}</h3>
+        <p><strong>Причина:</strong> ${esc(planner.user_reason || 'Сгенерированный план содержал недопустимые роли или схему.')}</p>
+        <p><strong>Восстановление:</strong> ${esc(planner.recovery || 'Выбран детерминированный планировщик.')}</p>
+        <p class="hint">Исполнение: стандартный инженерный конвейер (${esc(planner.fallback_profile || planner.final_planner || 'static')}).</p>
+        <details class="raw"><summary>Почему использовано восстановление</summary>
+          <p>AI-планировщик предложил недопустимую схему. Роли не переназначались автоматически. Предложение отклонено до исполнения.</p>
+          ${errors ? `<ul>${errors}</ul>` : ''}
+        </details>
+      </div>`;
+    }
+    if (planner.status === 'FAILED') {
+      return `<div class="error-box" id="planning-banner">
+        <h3>Планирование не удалось</h3>
+        <p>${esc(planner.headline || '')}</p>
+      </div>`;
+    }
+    return '';
   }
 
   async function api(path, opts) {
@@ -586,6 +637,8 @@ INDEX_HTML = """<!DOCTYPE html>
 
   let es = null;
   let pollTimer = null;
+  // Dedup activity cards across SSE replay, reconnect, and status polling.
+  const seenEventIds = {};
 
   async function renderRun(runId) {
     if (es) { es.close(); es = null; }
@@ -598,9 +651,7 @@ INDEX_HTML = """<!DOCTYPE html>
     try {
       const status = await api('/api/runs/' + encodeURIComponent(runId) + '/status');
       const life = String(status.lifecycle_status || '');
-      const done = ['COMPLETED', 'FAILED', 'ERROR', 'PLANNED'].includes(life)
-        && !['RUNNING'].includes(life);
-      if (done && life !== 'PLANNED' && status.final_state) {
+      if (['COMPLETED', 'FAILED', 'ERROR'].includes(life)) {
         const result = await api('/api/runs/' + encodeURIComponent(runId) + '/result');
         renderResultPage(runId, status, result);
         return;
@@ -631,9 +682,55 @@ INDEX_HTML = """<!DOCTYPE html>
     }
   }
 
+  function hitlHtml(status) {
+    if (!status.hitl_required && !status.hitl) return '';
+    const hitl = status.hitl || {};
+    const ctx = hitl.context || {};
+    const question = ctx.question || hitl.reason || 'Нужно уточнение, чтобы корректно провести исследование.';
+    const why = ctx.why || '';
+    const options = hitl.options || [];
+    const opts = options.map((o, i) => `
+      <label><input type="radio" name="hitl-choice" value="${esc(o)}" ${i===0?'checked':''}/> <span>${esc(o)}</span></label>
+    `).join('');
+    const textMode = (ctx.input_mode === 'text') || options.length === 0;
+    return `
+      <div class="hitl-box" id="hitl-box">
+        <h3>Нужно уточнение ${tip('Лаборатория остановилась: без ответа нельзя честно продолжить исследование. Это не сбой.')}</h3>
+        <p>${esc(question)}</p>
+        ${why ? `<p class="hint"><strong>Почему нужен ответ?</strong> ${esc(why)}</p>` : ''}
+        ${opts ? `<div class="opts">${opts}</div>` : ''}
+        ${textMode ? `<textarea id="hitl-note" placeholder="Короткий ответ (температуры, время, метрика…)"></textarea>` : ''}
+        <div class="row"><button type="button" id="hitl-continue">Продолжить исследование</button></div>
+      </div>`;
+  }
+
+  function bindHitl(runId, status) {
+    const btn = document.getElementById('hitl-continue');
+    if (!btn) return;
+    btn.onclick = async () => {
+      const picked = document.querySelector('input[name="hitl-choice"]:checked');
+      const noteEl = document.getElementById('hitl-note');
+      btn.disabled = true;
+      try {
+        await api('/api/runs/' + encodeURIComponent(runId) + '/resume', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            choice: picked ? picked.value : null,
+            note: noteEl ? noteEl.value : ''
+          })
+        });
+        await refreshRun(runId);
+      } catch (e) {
+        btn.disabled = false;
+        alert(e.message || String(e));
+      }
+    };
+  }
+
   function pipelineHtml(pipeline) {
     return `<ul class="pipeline">${(pipeline || []).map(n => {
-      const cls = n.status === 'DONE' ? 'done' : n.status === 'RUNNING' ? 'running' : n.status === 'FAILED' ? 'failed' : '';
+      const cls = n.status === 'DONE' ? 'done' : n.status === 'RUNNING' ? 'running' : n.status === 'FAILED' ? 'failed' : n.status === 'HITL' ? 'hitl running' : '';
       const tipText = 'Стадия из реального TaskGraph. Статус приходит с backend, а не из таймера в браузере.';
       return `<li class="${cls} has-tip" data-tip="${esc(tipText)}" tabindex="0">
         <strong>${esc(stageLabel(n.stage))}</strong>
@@ -651,13 +748,16 @@ INDEX_HTML = """<!DOCTYPE html>
       <p class="lead">
         <span class="trust-tag has-tip" tabindex="0" data-tip="Метка недоверенного пользовательского ввода. Внешние источники и выводы LLM тоже помечаются отдельно от проверенных фактов.">ВВОД ПОЛЬЗОВАТЕЛЯ</span>
         Запуск <code class="has-tip" tabindex="0" data-tip="Идентификатор запуска. Сохраните URL — после обновления страницы состояние восстановится.">${esc(runId)}</code>
-        · ${badge(status.lifecycle_status, 'Технический статус процесса: выполняется, завершён, ошибка…')}
+        ·         ${badge(status.lifecycle_status, 'Технический статус процесса: выполняется, завершён, ошибка…')}
         ${badge(status.engineering_status, 'Инженерный итог: достаточно ли доказательств для требуемого результата. Может отличаться от «код успешно выполнился».')}
+        ${status.planner && status.planner.status ? badge(status.planner.status, 'Статус AI-планировщика отдельно от инженерного итога.') : ''}
       </p>
+      ${planningBanner(status.planner)}
       <div class="layout-2">
         <div class="panel">
           <h3>Конвейер ${tip('Состав стадий зависит от задачи: простой расчёт короче, исследование с симуляцией длиннее. Список строится из TaskGraph.')}</h3>
           <div id="pipeline">${pipelineHtml(status.pipeline)}</div>
+          <div id="hitl-slot">${hitlHtml(status)}</div>
         </div>
         <div class="panel">
           <h3>Журнал событий ${tip('Поток Server-Sent Events с backend. Если связь оборвётся, статус продолжит обновляться опросом — новый run не создаётся.')}</h3>
@@ -677,22 +777,47 @@ INDEX_HTML = """<!DOCTYPE html>
         </div>
       </div>
     `;
+    bindHitl(runId, status);
   }
 
   function updateLive(status) {
     const pipe = document.getElementById('pipeline');
     if (pipe) pipe.innerHTML = pipelineHtml(status.pipeline);
+    const slot = document.getElementById('hitl-slot');
+    if (slot) {
+      const want = !!(status.hitl_required || status.hitl);
+      const hasForm = !!document.getElementById('hitl-continue');
+      if (want && !hasForm) {
+        slot.innerHTML = hitlHtml(status);
+        bindHitl(status.run_id, status);
+      } else if (!want && hasForm) {
+        slot.innerHTML = '';
+      }
+    }
     const req = document.getElementById('req');
     if (req) req.textContent = status.required_outputs ?? '—';
     const ver = document.getElementById('ver');
     if (ver) ver.textContent = status.verified_outputs ?? '—';
     const ev = document.getElementById('ev');
     if (ev) ev.textContent = statusLabel(status.evidence_status) || '—';
+    const banner = document.getElementById('planning-banner');
+    const html = planningBanner(status.planner);
+    if (banner && html) banner.outerHTML = html;
+    else if (!banner && html) {
+      const lead = document.querySelector('.lead');
+      if (lead) lead.insertAdjacentHTML('afterend', html);
+    }
   }
 
   const EVENT_RU = {
     'run.created': 'Запуск создан',
     'pipeline.ready': 'Конвейер готов',
+    'scope.resolved': 'Постановка задачи зафиксирована',
+    'scope.clarification_required': 'Нужно уточнение постановки',
+    'scope.unresolved': 'Постановку не удалось зафиксировать',
+    'research.attempt': 'Поисковая стратегия',
+    'planner.proposal_rejected': 'Предложение AI-планировщика отклонено',
+    'planner.recovered': 'Детерминированное восстановление плана',
     'stage.started': 'Стадия началась',
     'stage.completed': 'Стадия завершена',
     'stage.failed': 'Стадия с ошибкой',
@@ -707,23 +832,33 @@ INDEX_HTML = """<!DOCTYPE html>
   function connectStream(runId) {
     if (es) es.close();
     const box = document.getElementById('activity');
+    if (!seenEventIds[runId]) seenEventIds[runId] = new Set();
     es = new EventSource('/api/runs/' + encodeURIComponent(runId) + '/stream');
     const onAny = (ev) => {
       try {
         const data = JSON.parse(ev.data);
         if (!box) return;
+        const eid = data.event_id;
+        if (eid && seenEventIds[runId].has(eid)) return;
+        if (eid) seenEventIds[runId].add(eid);
         const line = document.createElement('div');
         const msg = data.message || ev.type;
         const ru = EVENT_RU[msg] || msg;
         const stage = data.data && data.data.stage ? ` [${stageLabel(data.data.stage)}]` : '';
-        line.textContent = `${ru}${stage}`;
+        const extra = [];
+        if (data.data && data.data.outcome) extra.push(statusLabel(data.data.outcome) || data.data.outcome);
+        if (data.data && data.data.sources_retained != null) extra.push(data.data.sources_retained + ' релевантных');
+        const tail = extra.length ? ' — ' + extra.join(', ') : '';
+        line.textContent = `${ru}${stage}${tail}`;
         box.appendChild(line);
         box.scrollTop = box.scrollHeight;
         const hint = document.getElementById('live-hint');
         if (hint) hint.textContent = ru;
       } catch (_) {}
     };
-    ['run.created','pipeline.ready','stage.started','stage.completed','stage.failed',
+    ['run.created','pipeline.ready','scope.resolved','scope.clarification_required','scope.unresolved',
+     'research.attempt','planner.proposal_rejected','planner.recovered',
+     'stage.started','stage.completed','stage.failed',
      'task.started','task.completed','task.failed','run.completed','run.failed','message'
     ].forEach(name => es.addEventListener(name, onAny));
     es.onerror = () => {
@@ -732,15 +867,59 @@ INDEX_HTML = """<!DOCTYPE html>
     };
   }
 
+  function scopeSection(result) {
+    const scope = result.scope || {};
+    if (!scope || (!scope.original_problem && !scope.objective)) return '';
+    const orig = (scope.original_problem || '').trim().split('\\n')[0] || '';
+    const clar = (scope.clarifications || []).length
+      ? '<p class="hint">Clarification provided by user</p>' : '';
+    return `
+      <section class="section panel">
+        <h2>Постановка ${tip('Исходный вопрос пользователя неизменен. Downstream работает по locked scope, а не по переписанному промпту.')}</h2>
+        ${badge(scope.status || '')}
+        ${orig ? `<p><strong>Исходный вопрос:</strong> ${esc(orig)}</p>` : ''}
+        ${scope.objective ? `<p><strong>Зафиксированная цель:</strong> ${esc(scope.objective)}</p>` : ''}
+        ${scope.rationale ? `<p class="hint">${esc(scope.rationale)}</p>` : ''}
+        ${clar}
+      </section>`;
+  }
+
+  function researchSection(result) {
+    const research = result.research || {};
+    const attempts = research.attempts || [];
+    if (!research.outcome && !attempts.length) return '';
+    const rows = attempts.map((a, i) => {
+      const n = i + 1;
+      const kept = a.sources_retained != null ? a.sources_retained : '—';
+      return `<li>Стратегия ${n}: ${esc(statusLabel(a.outcome) || a.outcome || '')} · релевантных ${esc(kept)}</li>`;
+    }).join('');
+    return `
+      <section class="section panel">
+        <h2>Исследовательский поиск ${tip('Пустой поиск не равен «доказательств не существует». Ошибка провайдера показывается отдельно.')}</h2>
+        <p>${badge(research.outcome || '')}
+          ${research.required_count ? `<span class="hint">покрытие ${esc(research.covered_count)}/${esc(research.required_count)}</span>` : ''}
+        </p>
+        ${rows ? `<ul>${rows}</ul>` : ''}
+      </section>`;
+  }
+
   function renderResultPage(runId, status, result) {
     const eng = result.engineering_outcome || status.engineering_status;
+    const life = String(result.lifecycle_status || status.lifecycle_status || '').toUpperCase();
+    const runError = result.error || status.error || '';
     const insufficient = ['INSUFFICIENT_EVIDENCE', 'FAIL', 'DISPUTED'].includes(String(eng || '').toUpperCase())
       || String(result.report_gate || '').includes('INSUFFICIENT');
     const numbers = result.key_numbers || [];
     const primary = numbers[0];
     const missing = (result.evidence && result.evidence.missing_required_outputs) || [];
 
-    const hero = insufficient ? `
+    const failed = life === 'ERROR' || life === 'FAILED';
+    const hero = failed ? `
+      <div class="hero-result error-box" style="background:transparent">
+        <h3>Исследование не выполнено ${tip('Технический сбой пайплайна. Это не инженерный вердикт PASS/FAIL.')}</h3>
+        <div class="value" style="font-size:1.6rem">${badge(life)}</div>
+        <p>${esc(runError || result.executive_summary || 'Пайплайн остановился до инженерного результата.')}</p>
+      </div>` : insufficient ? `
       <div class="hero-result error-box" style="background:transparent">
         <h3>Исследование завершено ${tip('Это не «падение» системы: лаборатория честно сообщает, что доказательств недостаточно.')}</h3>
         <div class="value" style="font-size:1.6rem">${badge(eng || 'INSUFFICIENT_EVIDENCE')}</div>
@@ -749,7 +928,7 @@ INDEX_HTML = """<!DOCTYPE html>
       </div>` : `
       <div class="hero-result">
         <h3>Результат ${tip('Крупный итог показывается как авторитетный только если есть проверенные claims. Иначе статус будет «не проверено» или «недостаточно доказательств».')}</h3>
-        ${primary ? `<div class="hint">${esc(primary.label || 'Основной выход')}</div>
+        ${primary && primary.accepted !== false ? `<div class="hint">${esc(primary.label || 'Основной выход')}</div>
           <div class="value">${esc(primary.value)}${primary.unit ? ' ' + esc(primary.unit) : ''}</div>` : ''}
         <div>${badge(eng || result.report_gate || 'COMPLETED')}</div>
         <p class="lead" style="margin:1rem auto 0;max-width:36rem">${esc(result.executive_summary || '')}</p>
@@ -762,9 +941,12 @@ INDEX_HTML = """<!DOCTYPE html>
         <a href="/api/runs/${esc(runId)}/export?format=json" class="has-tip" data-tip="Структурированный JSON отчёта для дальнейшей обработки.">Экспорт JSON</a>
       </p>
       ${hero}
-      ${numbers.length > 1 ? `<section class="section"><h2>Ключевые величины ${tip('Числа из verified_results. Непроверенные значения не выдаются за финальный ответ.')}</h2><div class="cards">${numbers.map(n => `
+      ${planningBanner(result.planning || status.planner)}
+      ${scopeSection(result)}
+      ${researchSection(result)}
+      ${numbers.length > 1 ? `<section class="section"><h2>Ключевые величины ${tip('Числа только из accepted/verified claims. Synthesis/LLM не задаёт количественный результат.')}</h2><div class="cards">${numbers.map(n => `
         <div class="card"><div class="hint">${esc(n.label)}</div><div class="v">${esc(n.value)}${n.unit ? ' ' + esc(n.unit) : ''}</div>
-        ${badge(n.verified ? 'VERIFIED' : 'UNVERIFIED')}</div>`).join('')}</div></section>` : ''}
+        ${badge(n.accepted && n.verified ? 'VERIFIED' : 'UNVERIFIED')}</div>`).join('')}</div></section>` : ''}
       <section class="section panel">
         <h2>Почему такой результат ${tip('Краткая цепочка рассуждения/расчёта по артефактам. Не скрытый chain-of-thought модели, а структурированные шаги.')}</h2>
         <div class="chain">${(result.why || []).map(s => `<div>→ ${esc(s)}</div>`).join('') || '<div class="hint">Цепочка не записана</div>'}</div>
@@ -804,12 +986,20 @@ INDEX_HTML = """<!DOCTYPE html>
           </div>`).join('') || '<div class="hint">Утверждений нет</div>'}</div>
       </section>
       <section class="section panel">
-        <h2>Допущения ${tip('Не смешиваются с фактами. Статусы: Дано / Допущение / Выведено / Оценка.')}</h2>
+        <h2>Пробелы в доказательствах ${tip('Это не допущения. Лаборатория не подменяет отсутствующие источники фразой «считаем, что данных нет».')}</h2>
+        <ul>${(result.evidence_gaps || []).map(g => `<li>${esc(typeof g === 'string' ? g : JSON.stringify(g))}</li>`).join('') || '<li class="hint">Пробелов не зафиксировано</li>'}</ul>
+      </section>
+      <section class="section panel">
+        <h2>Допущения ${tip('Не смешиваются с фактами и не маскируют evidence gap. Статусы: Дано / Допущение / Выведено / Оценка.')}</h2>
         <ul>${(result.assumptions || []).map(a => `<li>${badge(a.status)} ${esc(a.text)}</li>`).join('') || '<li class="hint">Не извлечены</li>'}</ul>
       </section>
       <section class="section panel">
         <h2>Ограничения ${tip('Обязательный блок: что не проверялось экспериментально, какие упрощения модели, где остаётся неопределённость.')}</h2>
         <ul>${(result.limitations || []).map(l => `<li>${esc(l)}</li>`).join('') || '<li class="hint">Ограничения не указаны</li>'}</ul>
+      </section>
+      <section class="section panel">
+        <h2>Нерешённые вопросы ${tip('Что осталось неоднозначным после постановки и поиска. Не выдаётся как FACT.')}</h2>
+        <ul>${(result.open_questions || []).map(q => `<li>${esc(q)}</li>`).join('') || '<li class="hint">Не зафиксированы</li>'}</ul>
       </section>
       <section class="section panel">
         <h2>Происхождение (provenance) ${tip('Цепочка Problem → … → Decision. Сырые артефакты доступны по ссылкам ниже.')}</h2>

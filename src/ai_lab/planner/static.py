@@ -328,7 +328,14 @@ class StaticPlanner:
             return pipeline_tasks_for_profile(WorkflowProfile.RESEARCH)
         raise ValueError(f"Unhandled static pipeline {self.pipeline!r}")
 
-    async def propose(self, context: ProblemContext) -> TaskGraphProposal:
+    async def propose(
+        self,
+        context: ProblemContext,
+        *,
+        repair_errors: list[str] | None = None,
+    ) -> TaskGraphProposal:
+        # repair_errors is LLM-retry only; static graphs are rebuilt from the problem.
+        del repair_errors
         tasks = self._tasks()
         return TaskGraphProposal(
             graph_id=self.graph_id,
