@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import tempfile
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -46,12 +47,53 @@ class SandboxViolation(ValueError):
     """Tool-policy violation (imports / forbidden names). Not SandboxStatus.FAIL."""
 
 
+class SandboxSyntaxError(SandboxViolation):
+    """LLM snippet is not valid Python. Not a security violation — no computation evidence."""
+
+    def __init__(self, message: str, *, source: str = "") -> None:
+        super().__init__(message)
+        self.source = source
+
+
+def coerce_sandbox_code(value: Any) -> str:
+    """Normalize LLM sandbox snippets to module-level Python source.
+
+    Live providers return a string, a list of lines, or ``{code|source|text}``.
+    Common leading indent is stripped so the snippet parses at module scope.
+    Mixed/unexpected indents are left unchanged and fail in ``ast.parse``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        raw = value
+    elif isinstance(value, list):
+        raw = "\n".join("" if x is None else str(x) for x in value)
+    elif isinstance(value, dict):
+        raw = str(value.get("code") or value.get("source") or value.get("text") or "")
+    else:
+        raw = str(value)
+    return textwrap.dedent(raw.expandtabs(4)).strip()
+
+
+def _syntax_preview(source: str, *, limit: int = 16) -> str:
+    lines = source.splitlines() or [source]
+    numbered = "\n".join(f"{i:3d}| {line}" for i, line in enumerate(lines[:limit], 1))
+    extra = len(lines) - limit
+    if extra > 0:
+        numbered += f"\n... ({extra} more lines)"
+    return numbered
+
+
 def validate_imports(source: str, allowed_modules: set[str]) -> None:
     """Reject scripts that import modules outside the trusted whitelist."""
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
-        raise SandboxViolation(f"Syntax error in sandbox script: {exc}") from exc
+        preview = _syntax_preview(source)
+        raise SandboxSyntaxError(
+            f"Syntax error in sandbox script: {exc}\n{preview}",
+            source=source,
+        ) from exc
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -123,10 +165,15 @@ class PythonExecTool:
         )
 
     async def run(self, code: str = "", **kwargs: Any) -> dict[str, Any]:
-        if not code or not code.strip():
+        code = coerce_sandbox_code(code)
+        if not code:
             raise ValueError("python.execute requires non-empty 'code'")
         reject_host_control_kwargs(kwargs)
-        validate_imports(code, self.allowed_modules)
+        try:
+            validate_imports(code, self.allowed_modules)
+        except SandboxSyntaxError:
+            logger.error("Sandbox script failed to parse:\n%s", code[:4000])
+            raise
 
         inputs = kwargs.pop("inputs", None) or {}
         if not isinstance(inputs, dict):

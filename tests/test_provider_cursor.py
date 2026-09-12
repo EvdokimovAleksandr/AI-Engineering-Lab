@@ -108,6 +108,37 @@ async def test_cursor_malformed_json_raises(
         )
 
 
+@pytest.mark.asyncio
+async def test_cursor_invalid_latex_escape_is_repaired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Simulation-style Cursor JSON with raw \\sigma must parse, not abort the run."""
+    pytest.importorskip("cursor_sdk")
+    monkeypatch.setenv("CURSOR_API_KEY", "test-key-not-real")
+    provider = CursorSDKProvider(api_key="test-key-not-real", reasoning_only=True)
+
+    async def _fake_prompt(prompt: str, model: str):
+        class R:
+            status = "finished"
+            result = '{"expression": "\\sigma = 4F/(\\pi * d**2)", "ok": true}'
+            id = "x"
+            usage = None
+            duration_ms = 1
+
+        return R()
+
+    monkeypatch.setattr(provider, "_prompt_once", _fake_prompt)
+    response = await provider.complete(
+        LLMRequest(
+            messages=[LLMMessage(role="user", content="hi")],
+            metadata={"agent_role": "simulation"},
+        )
+    )
+    assert response.parsed is not None
+    assert response.parsed["ok"] is True
+    assert "sigma" in response.parsed["expression"]
+
+
 def test_extract_usage_from_token_usage_object() -> None:
     class TokenUsage:
         input_tokens = 4

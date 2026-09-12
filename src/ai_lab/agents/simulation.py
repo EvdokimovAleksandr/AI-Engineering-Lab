@@ -21,6 +21,7 @@ from ai_lab.core.models import (
     VerificationPolicy,
 )
 from ai_lab.observability.logger import get_logger
+from ai_lab.tools.python_exec import SandboxSyntaxError, coerce_sandbox_code
 
 logger = get_logger(__name__)
 
@@ -33,7 +34,8 @@ class SimulationAgent(BaseAgent):
         "Do not claim experimental FACT. JSON only with keys: calculation_spec, "
         "code, declared_outputs, claims "
         "(claims may include math_check with expression/expected/inputs/units). "
-        "declared_outputs must be {name: {value, unit}} matching calculation_spec."
+        "declared_outputs must be {name: {value, unit}} matching calculation_spec. "
+        "Formulas in JSON must not use raw LaTeX backslashes; write 4*F/(pi*d**2)."
     )
 
     async def run(self, task: TaskSpec, ctx: AgentContext) -> AgentResult:
@@ -86,7 +88,7 @@ class SimulationAgent(BaseAgent):
             schema_name="SimulationOutput",
         )
 
-        code = str(payload.get("code") or "").strip()
+        code = coerce_sandbox_code(payload.get("code"))
         if not code:
             logger.error("Simulation agent returned empty code")
             raise ValueError("Simulation agent must return non-empty code")
@@ -142,6 +144,18 @@ class SimulationAgent(BaseAgent):
                 allowed=allowed,
                 code=code,
                 task_id=task.task_id,
+            )
+        except SandboxSyntaxError as exc:
+            # Invalid Python is a failed calculation, not a lab crash.
+            logger.error("Simulation python.execute syntax error: %s\n%s", exc, code)
+            return await self._syntax_error_result(
+                task,
+                ctx,
+                allowed=allowed,
+                payload=payload,
+                code=code,
+                calc_spec=calc_spec,
+                exc=exc,
             )
         except Exception as exc:
             logger.error("Simulation python.execute failed: %s", exc)
@@ -304,5 +318,67 @@ class SimulationAgent(BaseAgent):
                 "calculation_spec": calc_spec.model_dump(mode="json") if calc_spec else None,
                 "relevance": relevance.model_dump(mode="json") if relevance else None,
                 "contract_error": contract_error,
+            },
+        )
+
+    async def _syntax_error_result(
+        self,
+        task: TaskSpec,
+        ctx: AgentContext,
+        *,
+        allowed: list[str],
+        payload: dict,
+        code: str,
+        calc_spec: object | None,
+        exc: SandboxSyntaxError,
+    ) -> AgentResult:
+        """Record a parse failure as OPINION so the run can continue without invented numbers."""
+        spec_dump = calc_spec.model_dump(mode="json") if calc_spec is not None else None
+        spec_id = spec_dump.get("spec_id") if isinstance(spec_dump, dict) else None
+        claim = Claim(
+            statement=f"Calculation script is not valid Python: {exc}",
+            kind=EvidenceKind.OPINION,
+            evidence="sandbox_syntax_error",
+            assumptions=["Sandbox code proposed by the model must parse as Python"],
+            falsifiers=["Re-run with a syntactically valid snippet"],
+            conditions={"sandbox_syntax_error": True, "calculation_spec_id": spec_id},
+            agent_id=self.role.value,
+            confidence=ConfidenceBreakdown(compute_check=0.0, assumption_quality=0.1),
+        )
+        paths: list[str] = [ctx.evidence.save_claim(claim, subdirectory="calculations")]
+        if calc_spec is not None and ctx.run_store is not None and spec_id:
+            paths.append(
+                ctx.run_store.save_planner_json(
+                    f"calculation_specs/{spec_id}.json",
+                    spec_dump,
+                )
+            )
+        await ctx.tools.call(
+            "artifacts.save",
+            allowed=allowed,
+            path="simulations/last_run.json",
+            data={
+                "artifact_id": None,
+                "run_path": None,
+                "calculation_spec_id": spec_id,
+                "relevant": False,
+                "syntax_error": str(exc),
+                "code": code,
+            },
+        )
+        paths.append("simulations/last_run.json")
+        return AgentResult(
+            agent_role=self.role,
+            task_id=task.task_id,
+            summary="Simulation sandbox syntax error (no computation evidence)",
+            claims=[claim],
+            artifact_paths=paths,
+            raw={
+                "llm": payload,
+                "exec": None,
+                "artifact_id": None,
+                "calculation_spec": spec_dump,
+                "relevance": None,
+                "contract_error": str(exc),
             },
         )
