@@ -61,6 +61,7 @@ def classify_planner_failure(
         TaskGraphValidationReason.SOLVER_POLICY_VIOLATION,
         TaskGraphValidationReason.UNKNOWN_SOLVER,
         TaskGraphValidationReason.UNKNOWN_TOOL,
+        TaskGraphValidationReason.CONTRACT_BINDING_VIOLATION,
     }:
         return "policy_invalid"
     if reason in {

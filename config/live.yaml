@@ -1,0 +1,182 @@
+# AI Engineering Lab — live operator config (not CI).
+# Cursor SDK for reasoning + web search for research. The browser cannot override this file.
+# Start: python -m ai_lab ui --config config/live.yaml
+provider: cursor_sdk  # mock | cursor_sdk | replay
+
+# Per-role model IDs (identifiers only — not commercial lock-in)
+models:
+  chief_engineer: composer-2.5
+  research: composer-2.5
+  theorist: composer-2.5
+  simulation: composer-2.5
+  verification: composer-2.5
+  red_team: composer-2.5
+
+# V2.4a: deterministic role → provider/model. Omitted fields inherit `provider` + `models`.
+# Live profile pins every role on the top-level provider (cursor_sdk).
+#
+# Future multi-backend example (no Agent code changes — register factories only):
+#   routing:
+#     roles:
+#       chief_engineer: { provider: cursor_sdk, model: composer-2.5 }
+#       theorist:       { provider: openai,     model: gpt-5 }      # when openai factory exists
+#       verification:   { provider: anthropic,  model: claude-… }   # when anthropic factory exists
+routing:
+  version: "1"
+  roles:
+    chief_engineer:
+      model: composer-2.5
+    research:
+      model: composer-2.5
+    theorist:
+      model: composer-2.5
+    simulation:
+      model: composer-2.5
+    verification:
+      model: composer-2.5
+    red_team:
+      model: composer-2.5
+  default:
+    model: composer-2.5
+
+# Model diversity ≠ evidence independence. Defaults are off so mock CI remains valid.
+independence:
+  require_different_model_from_author: false
+  require_different_provider_between_reviewers: false
+  require_different_model_between_reviewers: false
+
+runtime:
+  max_iterations: 24
+  # Stop and ask human on disputed/critical red-team findings
+  hitl_on_disputed: true
+  hitl_on_expensive_experiment: true
+  hitl_on_plan: false
+  # V2.7.2: LLM proposes; invalid graphs retry once then recover via StaticPlanner.
+  # Validator remains authority — invented roles are never remapped or executed.
+  planner: llm  # static | llm — LLM proposes only; validator is authoritative
+  parallel_independent_groups: true
+  max_graph_reentries: 3
+  iteration:
+    no_progress_limit: 3
+    hitl_on_no_progress: false
+  budget:
+    max_iterations: 24
+    max_agent_calls: 100
+    max_tool_calls: 200
+    max_runtime_seconds: 3600
+    # Cursor live runs (LLM planner retry + review-bundle verification) exceed 500k.
+    max_tokens: 2000000
+    max_cost: 50.0
+
+sandbox:
+  backend: local_subprocess
+  fallback_backend: none  # never silently degrade docker → local
+  timeout_s: 10
+  timeout_seconds: 10  # alias of timeout_s
+  max_stdout_bytes: 200000
+  max_stderr_bytes: 200000
+  max_output_bytes: 200000  # alias used when stdout/stderr caps are omitted
+  memory_mb: 256
+  cpu_time_s: 10
+  network: deny
+  filesystem: run_scoped
+  kill_on_timeout: true
+  max_processes: 8
+  policy_version: v2.4c-1
+  # Docker-specific (used only when backend=docker). Image is trusted config, not ComputeSpec.
+  docker:
+    image: python:3.12-slim
+    image_digest: null  # pin sha256:<64 hex> for stronger identity; tag-only is PARTIAL
+    network: none
+    read_only_root: true
+    cap_drop_all: true
+    no_new_privileges: true
+    cpus: 1.0
+    non_root: true
+    user: "65534:65534"
+  # AST whitelist for python.execute (tool policy). Sandbox process still isolates execution.
+  allowed_modules:
+    - math
+    - cmath
+    - statistics
+    - decimal
+    - fractions
+    - json
+    - re
+    - typing
+    - dataclasses
+    - collections
+    - itertools
+    - functools
+    - operator
+    - numpy
+    - scipy
+    - sympy
+    - pandas
+    - matplotlib
+
+agents:
+  chief_engineer:
+    allowed_tools: [artifacts.save, artifacts.load, files.read, files.write]
+  research:
+    allowed_tools: [research.query, artifacts.save, artifacts.load, files.read]
+  theorist:
+    allowed_tools: [python.execute, artifacts.save, artifacts.load, files.read]
+  simulation:
+    allowed_tools: [python.execute, artifacts.save, artifacts.load, files.read]
+  verification:
+    allowed_tools: [python.execute, artifacts.save, artifacts.load, files.read]
+  red_team:
+    allowed_tools: [python.execute, artifacts.save, artifacts.load, files.read, research.query]
+
+observability:
+  run_events_dir: .runs
+
+# Deterministic engineering verification (V2.2). In-process; not a second RunBudget.
+verification:
+  limits:
+    max_computation_seconds: 2
+    max_expression_chars: 2000
+    max_ast_nodes: 200
+    max_quantities: 32
+
+# Live web search (duckduckgo, no key). Brave without BRAVE_SEARCH_API_KEY fails loud.
+research:
+  backend: web  # mock | replay | web
+  # Extra hosts classified as manufacturer docs (PRIMARY). Empty by default — do not guess.
+  primary_hosts: []
+  web:
+    engine: duckduckgo  # duckduckgo (no key) | brave (BRAVE_SEARCH_API_KEY)
+    api_key_env: BRAVE_SEARCH_API_KEY
+  limits:
+    max_queries: 8
+    max_sources: 12
+    max_content_bytes: 200000
+    timeout_seconds: 15
+    max_evidence_per_source: 3
+
+# V2.5 trusted simulation policy. LLM/UI cannot add solvers or raise limits.
+simulation:
+  pipeline: default  # default | uniaxial_tension | (overridden by TaskRouter profiles)
+  allowed_solvers:
+    - uniaxial_tension
+  require_explicit_assumptions: true
+
+# Task Router: classify task → deterministic policy → workflow profile.
+# Distinct from `routing:` (LLM model selection). LLM cannot lower policy floors.
+task_routing:
+  version: "1"
+  enabled: true
+  classifier: heuristic  # heuristic only for now; llm would propose, not decide
+  thresholds:
+    complexity_simple_max: 2
+    complexity_standard_max: 5
+    complexity_complex_max: 8
+    risk_low_max: 2
+    risk_medium_max: 5
+    risk_high_max: 8
+    uncertainty_low_max: 2
+    uncertainty_medium_max: 5
+    uncertainty_high_max: 8
+  # Omit `rules` to use built-in defaults (high risk → enhance, all-low → SIMPLE, …).
+

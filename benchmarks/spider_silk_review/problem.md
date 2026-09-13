@@ -25,4 +25,13 @@
 - uncertainty;
 - explicit missing evidence.
 
+**STUB / empty research ≠ engineering PASS** (expected_behavior:
+`ORCHESTRATION_ONLY`). Synthetic tensile fixtures remain STUB, not FACT.
+
+### Spider silk 2.0 scaffold
+
+Сфокусированная фаза (без полного industrial pipeline):
+[`phases/00_problem_definition/`](phases/00_problem_definition/) —
+главный cost bottleneck при заданной system boundary.
+
 Позже benchmark будет повторён на реальных источниках.

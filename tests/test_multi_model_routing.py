@@ -393,6 +393,8 @@ async def test_diverse_models_keep_blind_parallel_and_provenance(tmp_path: Path)
             kind=EvidenceKind.ASSUMPTION,
             run_id="run_route",
             project_id="proj",
+            investigation_id="proj",
+            task_id="task_test",
         ),
         subdirectory="analysis",
     )
@@ -470,6 +472,8 @@ async def test_hard_gate_survives_router(tmp_path: Path) -> None:
                 "tolerance": 1e-9,
                 "inputs": {},
             },
+            investigation_id="proj",
+            task_id="task_test",
         ),
         subdirectory="calculations",
     )

@@ -44,10 +44,28 @@ class ResearchAgent(BaseAgent):
         query0 = initial_query(scope, task.objective)
 
         async def _call(query: str, **_kw: object) -> ResearchResult:
+            # PR-C: research.query ingest writes claims — pass full ExecutionContext.
+            from ai_lab.core.execution_context import ExecutionContext, context_binding_dict
+
+            exec_ctx = ctx.execution_context
+            if exec_ctx is None:
+                exec_ctx = ExecutionContext.for_project_run(
+                    project_id=ctx.store.name,
+                    investigation_id=ctx.store.name,
+                    task_id=task.task_id,
+                    run_id=ctx.run_id,
+                )
+            elif not isinstance(exec_ctx, ExecutionContext):
+                exec_ctx = ExecutionContext.model_validate(exec_ctx)
+            binding = context_binding_dict(exec_ctx)
             payload = await ctx.tools.call(
                 "research.query",
                 allowed=allowed,
                 query=query,
+                project_id=binding["project_id"],
+                investigation_id=binding["investigation_id"],
+                task_id=binding["task_id"],
+                contract_version=binding["contract_version"],
             )
             return _result_from_tool(payload)
 
@@ -82,7 +100,29 @@ class ResearchAgent(BaseAgent):
         )
         report = recovered.report
         tool_result = recovered.result
+        # PR-01: stamp / gate research output to this task before claims attach.
+        from ai_lab.core.execution_context import (
+            ExecutionContext,
+            attach_research_result_to_context,
+            context_binding_dict,
+        )
+
+        exec_ctx = ctx.execution_context
+        if exec_ctx is None:
+            exec_ctx = ExecutionContext.for_project_run(
+                project_id=ctx.store.name,
+                investigation_id=ctx.store.name,
+                task_id=task.task_id,
+                run_id=ctx.run_id,
+            )
+        elif not isinstance(exec_ctx, ExecutionContext):
+            exec_ctx = ExecutionContext.model_validate(exec_ctx)
+        if tool_result is not None:
+            tool_result = attach_research_result_to_context(
+                tool_result, exec_ctx, where="ResearchResult.attach"
+            )
         tool_dump = tool_result.model_dump(mode="json") if tool_result is not None else {}
+        binding = context_binding_dict(exec_ctx)
 
         if ctx.run_store is not None:
             ctx.run_store.save_planner_json(
@@ -106,6 +146,7 @@ class ResearchAgent(BaseAgent):
                 "Search was not completed because the research provider failed.",
                 evidence=report.provider_error or "provider error",
                 extra={"research_outcome": report.outcome.value},
+                binding=binding,
             )
             extra_claims.append(claim)
             paths.append(ctx.evidence.save_claim(claim, subdirectory="research"))
@@ -120,6 +161,7 @@ class ResearchAgent(BaseAgent):
                     f"refinements={report.refinement_count}"
                 ),
                 extra={"research_outcome": report.outcome.value, "gaps": report.evidence_gaps},
+                binding=binding,
             )
             extra_claims.append(claim)
             paths.append(ctx.evidence.save_claim(claim, subdirectory="research"))
@@ -146,7 +188,7 @@ class ResearchAgent(BaseAgent):
                 ),
                 schema_name="ResearchFindings",
             )
-            findings, claim_paths = _findings_from_payload(payload, tool_dump, ctx)
+            findings, claim_paths = _findings_from_payload(payload, tool_dump, ctx, binding=binding)
             paths.extend(claim_paths)
 
         await ctx.tools.call(
@@ -180,8 +222,8 @@ class ResearchAgent(BaseAgent):
         )
 
 
-def _gap_claim(statement: str, *, evidence: str, extra: dict) -> Claim:
-    return Claim(
+def _gap_claim(statement: str, *, evidence: str, extra: dict, binding: dict | None = None) -> Claim:
+    claim = Claim(
         statement=statement,
         kind=EvidenceKind.EVIDENCE_GAP,
         evidence=evidence,
@@ -191,6 +233,13 @@ def _gap_claim(statement: str, *, evidence: str, extra: dict) -> Claim:
         confidence=ConfidenceBreakdown(source_quality=0.0, assumption_quality=0.0),
         falsifiers=["Independent retrieval of primary sources covering the locked scope"],
     )
+    if binding:
+        claim.project_id = binding.get("project_id")
+        claim.investigation_id = binding.get("investigation_id")
+        claim.task_id = binding.get("task_id")
+        claim.run_id = binding.get("run_id")
+        claim.contract_version = binding.get("contract_version")
+    return claim
 
 
 def _result_from_tool(payload: dict) -> ResearchResult:
@@ -226,7 +275,7 @@ def _result_from_tool(payload: dict) -> ResearchResult:
 
 
 def _findings_from_payload(
-    payload: dict, tool_result: dict, ctx: AgentContext
+    payload: dict, tool_result: dict, ctx: AgentContext, *, binding: dict | None = None
 ) -> tuple[list[ResearchFinding], list[str]]:
     findings: list[ResearchFinding] = []
     paths: list[str] = []
@@ -260,6 +309,23 @@ def _findings_from_payload(
         except (TypeError, ValueError):
             logger.error("Research findings[%s].relevance is %s; using 0.5", i, type(raw_relevance).__name__)
             relevance = 0.5
+        # PR-C: stamp full ExecutionContext — EvidenceStore no longer auto-fills.
+        claim_kwargs: dict = {}
+        if binding:
+            claim_kwargs = {
+                "project_id": binding["project_id"],
+                "investigation_id": binding["investigation_id"],
+                "task_id": binding["task_id"],
+                "run_id": binding["run_id"],
+                "contract_version": binding.get("contract_version"),
+            }
+        else:
+            claim_kwargs = {
+                "project_id": ctx.store.name,
+                "investigation_id": ctx.store.name,
+                "task_id": ctx.extra.get("task_id"),
+                "run_id": ctx.run_id,
+            }
         claim = Claim(
             statement=str(item.get("statement") or ""),
             kind=kind,
@@ -275,6 +341,7 @@ def _findings_from_payload(
                 source_quality=0.2 if source_trust == SourceTrustTier.STUB else (0.5 if source else 0.2),
                 assumption_quality=0.4,
             ),
+            **claim_kwargs,
         )
         rel = ctx.evidence.save_claim(claim, subdirectory="research")
         paths.append(rel)

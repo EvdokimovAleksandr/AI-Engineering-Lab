@@ -16,6 +16,9 @@ class EvidenceStore:
 
     Default list_claims() returns CURRENT_RUN only (no stale leakage).
     Pass visibility=PROJECT_HISTORY explicitly for history access.
+
+    PR-C: new claim writes require full ExecutionContext on the claim itself —
+    this store never auto-fills missing project/investigation/task/run ids.
     """
 
     def __init__(self, store: ProjectStore, *, run_id: str | None = None) -> None:
@@ -26,18 +29,54 @@ class EvidenceStore:
     def set_run_id(self, run_id: str) -> None:
         self.run_id = run_id
 
-    def save_claim(self, claim: Claim, subdirectory: str = "research") -> str:
+    def save_claim(
+        self,
+        claim: Claim,
+        subdirectory: str = "research",
+        *,
+        legacy_migrate: bool = False,
+    ) -> str:
         """Persist claim into current run namespace. `subdirectory` kept for API compat."""
         _ = subdirectory
+        from ai_lab.core.execution_context import (
+            ContextMismatchError,
+            require_write_execution_context,
+        )
+
         if claim.kind == EvidenceKind.FACT and not claim.source and not claim.evidence:
             raise ValueError("Refusing to store FACT without source/evidence")
-        if not claim.run_id:
-            if not self.run_id:
-                raise ValueError("EvidenceStore.save_claim requires run_id on claim or store")
-            claim.run_id = self.run_id
-        if not claim.project_id:
-            claim.project_id = self.store.name
-        saved = self._repo.save_claim(claim)
+        # PR-C: no soft-fill of run_id / project_id / investigation_id from store.
+        require_write_execution_context(
+            claim,
+            where="EvidenceStore.save_claim",
+            legacy_migrate=legacy_migrate,
+        )
+        if self.run_id and claim.run_id != self.run_id:
+            raise ContextMismatchError(
+                "Claim.run_id does not match EvidenceStore.run_id",
+                field="run_id",
+                expected=self.run_id,
+                actual=claim.run_id,
+                where="EvidenceStore.save_claim",
+            )
+        if claim.project_id != self.store.name:
+            raise ContextMismatchError(
+                "Claim.project_id does not match project store",
+                field="project_id",
+                expected=self.store.name,
+                actual=claim.project_id,
+                where="EvidenceStore.save_claim",
+            )
+        # investigation_id must match project folder until multi-investigation projects exist.
+        if claim.investigation_id != self.store.name:
+            raise ContextMismatchError(
+                "Claim.investigation_id does not match project store",
+                field="investigation_id",
+                expected=self.store.name,
+                actual=claim.investigation_id,
+                where="EvidenceStore.save_claim",
+            )
+        saved = self._repo.save_claim(claim, legacy_migrate=legacy_migrate)
         # Return run-scoped relative path
         return f".runs/{saved.run_id}/claims/{saved.claim_id}_v{saved.version}.json"
 
@@ -46,11 +85,13 @@ class EvidenceStore:
         old_claim_id: str,
         new_claim: Claim,
         subdirectory: str = "research",
+        *,
+        legacy_migrate: bool = False,
     ) -> str:
         _ = subdirectory
-        if not new_claim.run_id:
-            new_claim.run_id = self.run_id
-        saved = self._repo.supersede_claim(old_claim_id, new_claim)
+        saved = self._repo.supersede_claim(
+            old_claim_id, new_claim, legacy_migrate=legacy_migrate
+        )
         return f".runs/{saved.run_id}/claims/{saved.claim_id}_v{saved.version}.json"
 
     def load_claim(self, claim_id: str) -> Claim:

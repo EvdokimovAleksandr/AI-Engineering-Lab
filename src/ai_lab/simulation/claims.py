@@ -87,6 +87,11 @@ def claims_from_simulation(
     result: SimulationResult,
     *,
     verification_specs: list[VerificationSpec],
+    project_id: str | None = None,
+    investigation_id: str | None = None,
+    task_id: str | None = None,
+    run_id: str | None = None,
+    contract_version: str | None = None,
 ) -> list[Claim]:
     """Quantitative claims tied to SimulationResult + optional VerificationSpec."""
     claims: list[Claim] = []
@@ -140,6 +145,11 @@ def claims_from_simulation(
                     assumption_quality=0.3,
                     source_quality=0.0 if stub else 0.4,
                 ),
+                project_id=project_id,
+                investigation_id=investigation_id,
+                task_id=task_id,
+                run_id=run_id,
+                contract_version=contract_version,
             )
         )
     return claims

@@ -6,13 +6,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ai_lab.core.enums import AgentRole, TaskGraphValidationReason, TaskKind
+from ai_lab.core.enums import AgentRole, ContractStatus, TaskGraphValidationReason, TaskKind
 from ai_lab.core.models import (
     RunBudget,
     TaskGraph,
     TaskGraphValidationResult,
     TaskSpec,
 )
+from ai_lab.planner.contract_binding import contract_binding_errors
 from ai_lab.planner.dag import CycleError, topological_order
 from ai_lab.planner.hashing import task_graph_hash
 from ai_lab.planner.proposal import _scan_forbidden
@@ -40,6 +41,12 @@ class TaskGraphValidationContext:
     routing_policy: Any = None
     independence_policy: Any = None
     available_providers: frozenset[str] | None = None
+    # PR-04: EngineeringContract binding (TaskGraph = f(contract)).
+    contract_version: str | None = None
+    contract_status: ContractStatus | None = None
+    investigation_id: str | None = None
+    required_outputs: list[str] = field(default_factory=list)
+    require_calculation_producers: bool = False
 
 
 def default_budget_slice(task: TaskSpec) -> tuple[int, int, int, float]:
@@ -165,6 +172,14 @@ def validate_task_graph(
     solver_err, solver_reason = _validate_solver_policy(graph)
     if solver_err:
         return _fail(solver_reason, solver_err, topo=topo)
+
+    contract_err = _validate_contract_binding(graph, ctx)
+    if contract_err:
+        return _fail(
+            TaskGraphValidationReason.CONTRACT_BINDING_VIOLATION,
+            contract_err,
+            topo=topo,
+        )
 
     return TaskGraphValidationResult(
         ok=True,
@@ -374,3 +389,17 @@ def _validate_routing(graph: TaskGraph, ctx: TaskGraphValidationContext) -> list
         ),
     )
     return list(result.errors)
+
+
+def _validate_contract_binding(
+    graph: TaskGraph, ctx: TaskGraphValidationContext
+) -> list[str]:
+    """Reject cross-version / orphan tasks when an EngineeringContract is in force."""
+    return contract_binding_errors(
+        graph,
+        contract_version=ctx.contract_version,
+        contract_status=ctx.contract_status,
+        investigation_id=ctx.investigation_id,
+        required_outputs=list(ctx.required_outputs or []),
+        require_calculation_producers=ctx.require_calculation_producers,
+    )

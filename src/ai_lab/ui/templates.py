@@ -934,12 +934,16 @@ INDEX_HTML = """<!DOCTYPE html>
         <p class="lead" style="margin:1rem auto 0;max-width:36rem">${esc(result.executive_summary || '')}</p>
       </div>`;
 
+    const modeLine = result.execution_mode
+      ? `<p class="hint">MODE: <strong>${esc(result.execution_mode)}</strong> (provider=${esc(result.provider || 'unknown')}) ${tip('MOCK/STUB research ≠ LIVE research failure. Пустой MOCK-поиск не значит, что источники «не существуют».')}</p>`
+      : '';
     app.innerHTML = `
       <p class="hint">
         <a href="/projects/${esc(result.project_id || status.project_id)}" class="has-tip" data-tip="Вернуться к проекту.">← Проект</a> ·
         <a href="/api/runs/${esc(runId)}/export?format=markdown" class="has-tip" data-tip="Скачать человекочитаемый отчёт в Markdown из сохранённых артефактов.">Экспорт Markdown</a> ·
         <a href="/api/runs/${esc(runId)}/export?format=json" class="has-tip" data-tip="Структурированный JSON отчёта для дальнейшей обработки.">Экспорт JSON</a>
       </p>
+      ${modeLine}
       ${hero}
       ${planningBanner(result.planning || status.planner)}
       ${scopeSection(result)}

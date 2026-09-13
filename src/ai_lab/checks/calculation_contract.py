@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_lab.checks.units import is_parseable_unit, units_compatible
+from ai_lab.checks.units import is_valid_expected_dimension, units_compatible
 from ai_lab.core.models import (
     CalculationSpec,
     Claim,
@@ -68,9 +68,10 @@ def extract_outputs_from_understanding(payload: dict[str, Any] | None) -> tuple[
                 unit = item.get("unit") or item.get("dimension")
                 if isinstance(unit, str) and unit.strip():
                     unit_s = unit.strip()
-                    if not is_parseable_unit(unit_s) and unit_s not in {"1", "dimensionless"}:
+                    # Dimension names / legacy SI (L, L**2) are valid contract tokens.
+                    if not is_valid_expected_dimension(unit_s):
                         logger.error(
-                            "Ignoring understanding output %r: unparseable unit %r",
+                            "Ignoring understanding output %r: invalid dimension/unit %r",
                             name,
                             unit_s,
                         )
@@ -84,9 +85,9 @@ def extract_outputs_from_understanding(payload: dict[str, Any] | None) -> tuple[
             name = str(key)
             if isinstance(val, str) and val.strip():
                 unit_s = val.strip()
-                if not is_parseable_unit(unit_s) and unit_s not in {"1", "dimensionless"}:
+                if not is_valid_expected_dimension(unit_s):
                     logger.error(
-                        "Ignoring understanding output %r: unparseable unit %r",
+                        "Ignoring understanding output %r: invalid dimension/unit %r",
                         name,
                         unit_s,
                     )
@@ -97,9 +98,9 @@ def extract_outputs_from_understanding(payload: dict[str, Any] | None) -> tuple[
                 unit = val.get("unit") or val.get("dimension")
                 if isinstance(unit, str) and unit.strip():
                     unit_s = unit.strip()
-                    if not is_parseable_unit(unit_s) and unit_s not in {"1", "dimensionless"}:
+                    if not is_valid_expected_dimension(unit_s):
                         logger.error(
-                            "Ignoring understanding output %r: unparseable unit %r",
+                            "Ignoring understanding output %r: invalid dimension/unit %r",
                             name,
                             unit_s,
                         )
@@ -115,9 +116,9 @@ def extract_outputs_from_understanding(payload: dict[str, Any] | None) -> tuple[
         for key, val in raw_dims.items():
             if isinstance(val, str) and val.strip():
                 unit_s = val.strip()
-                if not is_parseable_unit(unit_s) and unit_s not in {"1", "dimensionless"}:
+                if not is_valid_expected_dimension(unit_s):
                     logger.error(
-                        "Ignoring understanding expected_dimensions[%r]=%r (unparseable)",
+                        "Ignoring understanding expected_dimensions[%r]=%r (invalid)",
                         key,
                         unit_s,
                     )
@@ -135,13 +136,13 @@ def extract_outputs_from_understanding(payload: dict[str, Any] | None) -> tuple[
             continue
         filtered.append(n)
     names = list(dict.fromkeys(filtered))
-    # Lock only outputs with parseable dimensions — bare interpretive labels
+    # Lock only outputs with valid dimension/unit tokens — bare interpretive labels
     # (e.g. loss_factor_interpretation without a unit) must not soft-fail the run.
     lockable = [n for n in names if n in dims]
     dropped = [n for n in names if n not in dims]
     for n in dropped:
         logger.error(
-            "Not locking understanding output %r: missing parseable expected_dimensions",
+            "Not locking understanding output %r: missing valid expected_dimensions",
             n,
         )
     dims = {k: v for k, v in dims.items() if k in lockable}
@@ -201,20 +202,148 @@ def parse_calculation_spec(
     *,
     task_id: str | None = None,
     run_id: str | None = None,
+    project_id: str | None = None,
+    investigation_id: str | None = None,
+    contract_version: str | None = None,
     policy: VerificationPolicy | None = None,
+    execution_context: Any | None = None,
+    legacy_migrate: bool = False,
 ) -> CalculationSpec | None:
     """Parse LLM/proposal dict into CalculationSpec; policy locks trusted fields.
 
     LLM cannot delete required_outputs / expected_dimensions / mandatory checks
     once policy requires verification.
+
+    When execution_context (or explicit ids) is provided, a proposal that carries
+    a *different* task/run/project identity raises CONTEXT_MISMATCH — no remapping.
+
+    New writes require full identity (PR-C). Soft legacy fill only when
+    ``legacy_migrate=True``.
     """
     if not raw or not isinstance(raw, dict):
         return None
     data = dict(raw)
-    if task_id and not data.get("task_id"):
-        data["task_id"] = task_id
-    if run_id and not data.get("run_id"):
-        data["run_id"] = run_id
+
+    # Resolve expected binding: explicit kwargs win over ExecutionContext fields.
+    from ai_lab.core.execution_context import (
+        UNSET_CONTRACT_VERSION,
+        ExecutionContext,
+        MissingExecutionContextError,
+        require_context_match,
+        require_full_execution_identity,
+        stamp_context_fields,
+    )
+
+    expected: ExecutionContext | None = None
+    if execution_context is not None:
+        expected = (
+            execution_context
+            if isinstance(execution_context, ExecutionContext)
+            else ExecutionContext.model_validate(execution_context)
+        )
+    elif task_id and run_id and project_id:
+        expected = ExecutionContext.for_project_run(
+            project_id=project_id,
+            investigation_id=investigation_id,
+            task_id=task_id,
+            run_id=run_id,
+            contract_version=contract_version or UNSET_CONTRACT_VERSION,
+        )
+
+    if expected is not None:
+        # Fail loud if the proposal already stamped foreign ids.
+        require_context_match(
+            expected,
+            project_id=data.get("project_id"),
+            investigation_id=data.get("investigation_id"),
+            task_id=data.get("task_id"),
+            run_id=data.get("run_id"),
+            contract_version=data.get("contract_version"),
+            where="CalculationSpec.proposal",
+        )
+        stamped = stamp_context_fields(
+            expected,
+            project_id=data.get("project_id"),
+            investigation_id=data.get("investigation_id"),
+            task_id=data.get("task_id"),
+            run_id=data.get("run_id"),
+            contract_version=data.get("contract_version"),
+            where="CalculationSpec.proposal",
+        )
+        data.update(stamped)
+    elif legacy_migrate:
+        # Explicit migration path only — fill unset slots from caller kwargs.
+        if task_id and not data.get("task_id"):
+            data["task_id"] = task_id
+        if run_id and not data.get("run_id"):
+            data["run_id"] = run_id
+        if project_id and not data.get("project_id"):
+            data["project_id"] = project_id
+        if investigation_id and not data.get("investigation_id"):
+            data["investigation_id"] = investigation_id
+        if contract_version and not data.get("contract_version"):
+            data["contract_version"] = contract_version
+    else:
+        # Merge explicit kwargs then require full identity — no soft legacy-safe omit.
+        if task_id and not data.get("task_id"):
+            data["task_id"] = task_id
+        if run_id and not data.get("run_id"):
+            data["run_id"] = run_id
+        if project_id and not data.get("project_id"):
+            data["project_id"] = project_id
+        if investigation_id and not data.get("investigation_id"):
+            data["investigation_id"] = investigation_id
+        if contract_version and not data.get("contract_version"):
+            data["contract_version"] = contract_version
+        try:
+            require_full_execution_identity(
+                project_id=data.get("project_id"),
+                investigation_id=data.get("investigation_id"),
+                task_id=data.get("task_id"),
+                run_id=data.get("run_id"),
+                where="CalculationSpec.proposal",
+            )
+        except MissingExecutionContextError:
+            raise
+        # Refuse wrong identity even without a full ExecutionContext object.
+        from ai_lab.core.execution_context import ContextMismatchError
+
+        if task_id and data.get("task_id") and str(data["task_id"]) != str(task_id):
+            raise ContextMismatchError(
+                "CalculationSpec.task_id does not match caller task",
+                field="task_id",
+                expected=task_id,
+                actual=data.get("task_id"),
+                where="CalculationSpec.proposal",
+            )
+        if run_id and data.get("run_id") and str(data["run_id"]) != str(run_id):
+            raise ContextMismatchError(
+                "CalculationSpec.run_id does not match caller run",
+                field="run_id",
+                expected=run_id,
+                actual=data.get("run_id"),
+                where="CalculationSpec.proposal",
+            )
+        if project_id and data.get("project_id") and str(data["project_id"]) != str(project_id):
+            raise ContextMismatchError(
+                "CalculationSpec.project_id does not match caller project",
+                field="project_id",
+                expected=project_id,
+                actual=data.get("project_id"),
+                where="CalculationSpec.proposal",
+            )
+        if (
+            investigation_id
+            and data.get("investigation_id")
+            and str(data["investigation_id"]) != str(investigation_id)
+        ):
+            raise ContextMismatchError(
+                "CalculationSpec.investigation_id does not match caller investigation",
+                field="investigation_id",
+                expected=investigation_id,
+                actual=data.get("investigation_id"),
+                where="CalculationSpec.proposal",
+            )
 
     pol = policy or VerificationPolicy()
     # Trusted/policy overlay — LLM proposal cannot weaken verification.
@@ -262,11 +391,11 @@ def parse_calculation_spec(
 
 
 def sanitize_calculation_spec_units(spec: CalculationSpec) -> tuple[CalculationSpec, list[str]]:
-    """Drop unparseable expected_dimensions and demote those required outputs.
+    """Drop invalid expected_dimensions and demote those required outputs.
 
     LLM often emits formula prose as 'units'. Those tags must not kill an otherwise
-    valid CalculationSpec (false negative). Outputs with junk units are removed from
-    required_outputs; remaining parseable contract stays enforceable.
+    valid CalculationSpec (false negative). Dimension names and legacy SI letters
+    (length, L, L**2) are kept; junk prose is removed from required_outputs.
     """
     warnings: list[str] = []
     dims = dict(spec.expected_dimensions)
@@ -277,9 +406,9 @@ def sanitize_calculation_spec_units(spec: CalculationSpec) -> tuple[CalculationS
             logger.error("%s", warnings[-1])
             continue
         unit_s = (dims.get(name) or "").strip()
-        if unit_s and unit_s not in {"1", "dimensionless"} and not is_parseable_unit(unit_s):
+        if unit_s and not is_valid_expected_dimension(unit_s):
             warnings.append(
-                f"demoted required output {name!r}: unparseable unit {unit_s!r}"
+                f"demoted required output {name!r}: invalid dimension/unit {unit_s!r}"
             )
             dims.pop(name, None)
             logger.error("%s", warnings[-1])
@@ -288,8 +417,8 @@ def sanitize_calculation_spec_units(spec: CalculationSpec) -> tuple[CalculationS
     # Also drop orphan junk dims not in required list.
     for name, unit in list(dims.items()):
         unit_s = (unit or "").strip()
-        if unit_s and unit_s not in {"1", "dimensionless"} and not is_parseable_unit(unit_s):
-            warnings.append(f"dropped unparseable expected_dimensions[{name!r}]={unit_s!r}")
+        if unit_s and not is_valid_expected_dimension(unit_s):
+            warnings.append(f"dropped invalid expected_dimensions[{name!r}]={unit_s!r}")
             dims.pop(name, None)
             logger.error("%s", warnings[-1])
     if not warnings:
@@ -316,9 +445,10 @@ def validate_calculation_spec(spec: CalculationSpec) -> list[str]:
             errors.append(f"missing expected_dimensions for required output {name!r}")
         else:
             unit = (spec.expected_dimensions.get(name) or "").strip()
-            if unit and unit not in {"1", "dimensionless"} and not is_parseable_unit(unit):
+            if unit and not is_valid_expected_dimension(unit):
                 errors.append(
-                    f"expected_dimensions[{name!r}]={unit!r} is not a parseable unit"
+                    f"expected_dimensions[{name!r}]={unit!r} is not a valid "
+                    f"dimension name, legacy SI token, or Pint unit"
                 )
     if spec.verification_required and spec.minimum_checks < 1:
         errors.append("verification_required implies minimum_checks >= 1")
@@ -367,21 +497,62 @@ def validate_computation_against_spec(
     """Deterministic relevance: required outputs + dimensions vs declared outputs.
 
     Unrelated computation (e.g. memory_gib when power/W required) → invalid.
+    Identity mismatches (task/run/project) raise CONTEXT_MISMATCH — not soft FAIL.
     """
+    from ai_lab.core.execution_context import ContextMismatchError
+
     reasons: list[str] = []
     missing_inputs: list[str] = []
     missing_outputs: list[str] = []
     dimension_mismatches: list[str] = []
+
+    # Hard isolation: wrong binding is a lab error, not an irrelevant computation.
+    if calculation_spec.task_id and computation.task_id and computation.task_id != calculation_spec.task_id:
+        raise ContextMismatchError(
+            "ComputationArtifact.task_id does not match CalculationSpec.task_id",
+            field="task_id",
+            expected=calculation_spec.task_id,
+            actual=computation.task_id,
+            where="validate_computation_against_spec",
+        )
+    if calculation_spec.run_id and computation.run_id and computation.run_id != calculation_spec.run_id:
+        raise ContextMismatchError(
+            "ComputationArtifact.run_id does not match CalculationSpec.run_id",
+            field="run_id",
+            expected=calculation_spec.run_id,
+            actual=computation.run_id,
+            where="validate_computation_against_spec",
+        )
+    if (
+        calculation_spec.project_id
+        and computation.project_id
+        and computation.project_id != calculation_spec.project_id
+    ):
+        raise ContextMismatchError(
+            "ComputationArtifact.project_id does not match CalculationSpec.project_id",
+            field="project_id",
+            expected=calculation_spec.project_id,
+            actual=computation.project_id,
+            where="validate_computation_against_spec",
+        )
+    if (
+        calculation_spec.investigation_id
+        and computation.investigation_id
+        and computation.investigation_id != calculation_spec.investigation_id
+    ):
+        raise ContextMismatchError(
+            "ComputationArtifact.investigation_id does not match CalculationSpec",
+            field="investigation_id",
+            expected=calculation_spec.investigation_id,
+            actual=computation.investigation_id,
+            where="validate_computation_against_spec",
+        )
 
     # Binding: artifact must reference this spec when both ids present.
     if computation.calculation_spec_id and computation.calculation_spec_id != calculation_spec.spec_id:
         reasons.append(
             f"calculation_spec_id mismatch: artifact={computation.calculation_spec_id} "
             f"spec={calculation_spec.spec_id}"
-        )
-    if calculation_spec.task_id and computation.task_id and computation.task_id != calculation_spec.task_id:
-        reasons.append(
-            f"task_id mismatch: artifact={computation.task_id} spec={calculation_spec.task_id}"
         )
 
     outputs = _artifact_outputs(computation)
@@ -401,11 +572,11 @@ def validate_computation_against_spec(
             continue
         actual_unit = (outputs[name].unit or "").strip()
         expected = (expected_unit or "").strip()
-        # Pint dimensionality (W≡kW≡J/s). Unparseable tags never match.
+        # Semantic Dimension / legacy SI / Pint (W≡kW≡J/s; length|L ≡ m).
         if not units_compatible(expected, actual_unit):
             dimension_mismatches.append(f"{name}: expected {expected!r}, got {actual_unit!r}")
             reasons.append(
-                f"dimension mismatch for {name!r}: expected unit {expected!r}, got {actual_unit!r}"
+                f"dimension mismatch for {name!r}: expected {expected!r}, got {actual_unit!r}"
             )
 
     # Required inputs must appear in artifact metadata/result or declared input map.
@@ -465,6 +636,16 @@ def evaluate_evidence_completeness(
     output_aliases: dict[str, list[str]] | None = None,
     acceptance_passed: bool | None = None,
     acceptance_reasons: list[str] | None = None,
+    # PR-05: optional contract + evidence lineage (wired into completeness, not a second gate).
+    required_contract_outputs: list[str] | None = None,
+    evidence_records: list | None = None,
+    execution_context: Any | None = None,
+    # PR-B: semantic method/domain frame (EngineeringContract / InvestigationScope).
+    engineering_contract: Any | None = None,
+    investigation_scope: Any | None = None,
+    problem_objective: str | None = None,
+    original_problem: str | None = None,
+    declared_domain: str | None = None,
 ) -> EvidenceCompletenessReport:
     """Gate before adjudication: missing mandatory evidence ⇒ not PASS."""
     policy = verification_policy or VerificationPolicy()
@@ -479,6 +660,10 @@ def evaluate_evidence_completeness(
     provenance_complete = True
     required_output_coverage = True
     acceptance_ok = True if acceptance_passed is None else bool(acceptance_passed)
+    lineage_ok = True
+    contract_coverage_ok = True
+    method_compatible = True
+    coverage_ratio: float | None = None
 
     if require_calculation or policy.calculation_required:
         if not calculation_specs:
@@ -622,6 +807,57 @@ def evaluate_evidence_completeness(
         acceptance_ok = False
         reasons.extend(acceptance_reasons or ["benchmark acceptance contract failed"])
 
+    # PR-05: lineage + EngineeringContract output coverage (не дублирует numeric UnitVerifier).
+    from ai_lab.checks.lineage_coverage import evaluate_lineage_and_contract_coverage
+
+    contract_targets = list(required_contract_outputs or [])
+    lineage_report = evaluate_lineage_and_contract_coverage(
+        claims=claims,
+        computations=computations,
+        evidence=evidence_records or [],
+        required_outputs=contract_targets,
+        expected=execution_context,
+        output_aliases=aliases,
+    )
+    lineage_ok = lineage_report.lineage_ok
+    contract_coverage_ok = lineage_report.contract_coverage_ok
+    coverage_ratio = lineage_report.coverage_ratio
+    if not lineage_ok or not contract_coverage_ok:
+        reasons.extend(lineage_report.reasons)
+
+    # PR-B: Method/Domain Compatibility Gate — до adjudication PASS.
+    from ai_lab.checks.method_compatibility import (
+        evaluate_specs_method_compatibility,
+        problem_frame_from_sources,
+    )
+
+    method_frame = problem_frame_from_sources(
+        engineering_contract=engineering_contract,
+        investigation_scope=investigation_scope,
+        original_problem=original_problem,
+        objective=problem_objective,
+        declared_domain=declared_domain,
+        required_outputs=list(required_contract_outputs or policy.required_outputs or []),
+    )
+    if calculation_specs and (require_calculation or policy.calculation_required):
+        method_report = evaluate_specs_method_compatibility(calculation_specs, method_frame)
+        if not method_report.compatible:
+            method_compatible = False
+            computation_relevant = False
+            reasons.extend(method_report.reasons)
+            logger.error(
+                "Evidence completeness blocked by MethodCompatibilityGate: %s",
+                method_report.codes,
+            )
+
+    # PR-06: списки covered/missing для IterationController (не только ratio).
+    covered_outputs = list(lineage_report.covered_outputs)
+    missing_outputs = list(lineage_report.missing_outputs)
+    for rr in relevance:
+        for name in rr.missing_outputs:
+            if name not in missing_outputs and name not in covered_outputs:
+                missing_outputs.append(name)
+
     return EvidenceCompletenessReport(
         computation_complete=computation_complete,
         computation_relevant=computation_relevant,
@@ -630,6 +866,12 @@ def evaluate_evidence_completeness(
         provenance_complete=provenance_complete,
         required_output_coverage=required_output_coverage,
         acceptance_passed=acceptance_ok,
+        lineage_ok=lineage_ok,
+        contract_coverage_ok=contract_coverage_ok,
+        method_compatible=method_compatible,
+        coverage_ratio=coverage_ratio,
+        covered_outputs=covered_outputs,
+        missing_outputs=missing_outputs,
         reasons=reasons,
         relevance_results=relevance,
         required_checks=policy.minimum_checks if verification_required else 0,

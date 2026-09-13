@@ -41,6 +41,10 @@ def run_simulation(
             spec=spec,
             outputs=result.outputs,
             solver_id=spec.solver.solver_id,
+            project_id=context.project_id,
+            investigation_id=context.investigation_id,
+            task_id=context.task_id,
+            contract_version=context.contract_version,
         )
         if run_store is not None:
             run_store.save_computation(artifact)

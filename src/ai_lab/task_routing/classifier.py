@@ -127,10 +127,16 @@ class HeuristicTaskClassifier:
 
         extra = getattr(context, "extra_data", None) or {}
         hint = str(extra.get("pipeline_hint") or "") if isinstance(extra, dict) else ""
-        if hint == "research":
+        kind = str(extra.get("problem_kind") or "") if isinstance(extra, dict) else ""
+        if hint == "research" or kind == "RESEARCH_REVIEW":
             research_hits += 2
-        elif hint == "calculation":
+        elif hint == "calculation" or kind == "CLOSED_NUMERIC":
             simple_hits += 2
+        elif kind == "DESIGN":
+            standard_hits += 1
+        if kind == "OPEN_ENDED":
+            # Не должны дойти до router без HITL; если дошли — не притворяемся SIMPLE.
+            unc_hits = max(unc_hits, 3)
         if research_hits >= max(simple_hits, standard_hits, 1):
             task_type = "research_review"
             domain = "materials_biotech"

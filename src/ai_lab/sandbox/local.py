@@ -170,6 +170,10 @@ class LocalSubprocessSandbox:
 
         artifact = ComputationArtifact(
             run_id=context.run_id,
+            project_id=context.project_id,
+            investigation_id=context.investigation_id,
+            task_id=context.task_id,
+            contract_version=context.contract_version,
             kind="calculation",
             input_hash=id_hashes["input_hash"],
             code_hash=id_hashes["code_hash"],

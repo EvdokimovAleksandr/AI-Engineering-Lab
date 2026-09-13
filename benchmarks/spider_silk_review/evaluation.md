@@ -18,3 +18,5 @@
 - **explicit missing evidence** — gaps listed (required).
 
 Numeric “truth” of silk science is **out of scope** while backend is MOCK.
+Expected behavior: **ORCHESTRATION_ONLY** — STUB/empty research ≠ engineering PASS.
+See also `phases/00_problem_definition/` (spider silk 2.0 cost-bottleneck scaffold).

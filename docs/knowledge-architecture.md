@@ -47,6 +47,29 @@ History is never deleted; use `supersede_claim` / `REFUTES` edges.
 
 Nobody gets “load everything” by default.
 
+### Claim support status + evidence lineage (PR-05)
+
+Epistemic gate on `Claim.support_status` (not a second store):
+
+| `ClaimSupportStatus` | Meaning for synthesis |
+|----------------------|------------------------|
+| `PROPOSED` | Default; not proven unless verified computation + lineage |
+| `SUPPORTED` / `WEAKLY_SUPPORTED` | May enter grounded synthesis; **requires** `evidence_ids` / `calculation_ids` |
+| `UNVERIFIED` / `CONTRADICTED` / `REJECTED` | Never accepted quantitative truth |
+
+Mapping (no duplicate truth):
+
+- `EvidenceKind` — shape of the statement (`FACT`, `CALCULATION`, …)
+- `ClaimLifecycle` — store history (`ACTIVE`, `SUPERSEDED`, …)
+- `ClaimSupportStatus` — synthesis / coverage eligibility
+- `EvidenceType` on `EvidenceRecord` — provenance class:
+  `LITERATURE` | `EXPERIMENTAL` | `CALCULATED` | `SIMULATED` | `ASSUMED` | `USER_PROVIDED`
+
+Rules: `CALCULATED`/`SIMULATED` require `computation_artifact_id`; `LITERATURE` requires `source_id`.
+Claim → evidence attach across investigations raises `CONTEXT_MISMATCH`.
+Coverage/lineage verifiers (`checks/lineage_coverage.py`) feed `EvidenceCompletenessReport`
+(`lineage_ok`, `contract_coverage_ok`, `coverage_ratio`) → adjudication `INSUFFICIENT_EVIDENCE`.
+
 ### ApprovedKnowledge
 
 Promotion gates (deterministic policy — LLM cannot authorize):

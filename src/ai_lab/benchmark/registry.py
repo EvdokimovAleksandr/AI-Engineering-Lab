@@ -24,7 +24,11 @@ class BenchmarkSpec(BaseModel):
 
 
 def _default_expectations() -> dict[str, BenchmarkExpectation]:
-    from ai_lab.benchmark.models import InputAcceptance, OutputAcceptance
+    from ai_lab.benchmark.models import (
+        ExpectedBehavior,
+        InputAcceptance,
+        OutputAcceptance,
+    )
 
     # simple_heater: order-of-magnitude band from evaluation.md (~3–3.5 kW).
     # Both loss interpretations (×1.15 and /(1-0.15)) fall inside this band.
@@ -79,10 +83,14 @@ def _default_expectations() -> dict[str, BenchmarkExpectation]:
             must_exclude_tasks=["research", "red_team", "hypothesis"],
             notes=(
                 "Closed-form heater power; must not start full research workflow. "
-                "Acceptance: power in [3.0, 3.5] kW with correct inputs."
+                "Acceptance: power in [3.0, 3.5] kW with correct inputs. "
+                "PASS path under mock: simulation_fixture=heater_correct."
             ),
             acceptance_outputs=[heater_power],
             acceptance_inputs=heater_inputs,
+            expected_behavior=ExpectedBehavior.PASS,
+            expected_problem_kind="CLOSED_NUMERIC",
+            simulation_fixture="heater_correct",
         ),
         "shaft_design": BenchmarkExpectation(
             benchmark_id="shaft_design",
@@ -92,6 +100,7 @@ def _default_expectations() -> dict[str, BenchmarkExpectation]:
             must_include_tasks=["decomposition", "calculation", "verification"],
             must_exclude_tasks=[],
             notes="Preliminary shaft diameter; under-routing to SIMPLE is FAIL.",
+            expected_behavior=ExpectedBehavior.PASS,
         ),
         "spider_silk_review": BenchmarkExpectation(
             benchmark_id="spider_silk_review",
@@ -100,7 +109,35 @@ def _default_expectations() -> dict[str, BenchmarkExpectation]:
             forbidden_workflows=[WorkflowProfile.SIMPLE, WorkflowProfile.STANDARD],
             must_include_tasks=["research", "hypothesis", "verification", "red_team"],
             must_exclude_tasks=[],
-            notes="Orchestration benchmark; research backend may be MOCK.",
+            notes=(
+                "Orchestration benchmark; research backend may be MOCK. "
+                "STUB/empty research ≠ engineering PASS (ORCHESTRATION_ONLY). "
+                "See phases/00_problem_definition for spider silk 2.0 cost-bottleneck focus."
+            ),
+            expected_behavior=ExpectedBehavior.ORCHESTRATION_ONLY,
+            expected_problem_kind="RESEARCH_REVIEW",
+        ),
+        # PR-07: open-ended strength question must stop for clarification, not invent numbers.
+        "ambiguous_rod_strength": BenchmarkExpectation(
+            benchmark_id="ambiguous_rod_strength",
+            expected_workflow=WorkflowProfile.SIMPLE,
+            acceptable_over_route=[
+                WorkflowProfile.STANDARD,
+                WorkflowProfile.COMPLEX,
+                WorkflowProfile.RESEARCH,
+            ],
+            forbidden_workflows=[],
+            must_include_tasks=[],
+            must_exclude_tasks=[],
+            notes=(
+                "OPEN_ENDED: «Как сделать стержень прочнее?» → NEEDS_CLARIFICATION; "
+                "required field load_type. Fake numeric PASS is FAIL."
+            ),
+            expected_behavior=ExpectedBehavior.NEEDS_CLARIFICATION,
+            expected_scope_status="SCOPE_NEEDS_CLARIFICATION",
+            expected_problem_kind="OPEN_ENDED",
+            expected_failure_class="SCOPE",
+            required_clarification_fields=["load_type"],
         ),
     }
 

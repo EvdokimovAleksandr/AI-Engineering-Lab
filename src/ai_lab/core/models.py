@@ -15,6 +15,7 @@ from ai_lab.core.enums import (
     AttackSeverity,
     CheckStatus,
     ClaimLifecycle,
+    ClaimSupportStatus,
     DecisionStatus,
     EvidenceKind,
     EvidenceStrength,
@@ -67,11 +68,19 @@ class ConfidenceBreakdown(BaseModel):
 
 
 class Claim(BaseModel):
-    """Atomic claim with kind, conditions, falsifiers, run scope, and versioning."""
+    """Atomic claim with kind, conditions, falsifiers, run scope, and versioning.
+
+    PR-05 lineage: Claim points to evidence_ids / calculation_ids; synthesis gates
+    on support_status (not ClaimLifecycle alone).
+    """
 
     claim_id: str = Field(default_factory=lambda: _new_id("claim"))
     project_id: str | None = None
+    # PR-01: investigation binding (today equals project_id for on-disk projects).
+    investigation_id: str | None = None
+    task_id: str | None = None
     run_id: str | None = None
+    contract_version: str | None = None
     statement: str
     kind: EvidenceKind
     source: str | None = None
@@ -88,6 +97,12 @@ class Claim(BaseModel):
     supersedes: str | None = None
     superseded_by: str | None = None
     lifecycle: ClaimLifecycle = ClaimLifecycle.ACTIVE
+    # PR-05: epistemic status for synthesis gating (default PROPOSED until evidenced).
+    support_status: ClaimSupportStatus = ClaimSupportStatus.PROPOSED
+    # Explicit lineage refs (graph evidence_ids / ComputationArtifact ids / assumption claims).
+    evidence_ids: list[str] = Field(default_factory=list)
+    calculation_ids: list[str] = Field(default_factory=list)
+    assumption_ids: list[str] = Field(default_factory=list)
     evidence_strength: EvidenceStrength = EvidenceStrength.AI_CLAIM
     content_hash: str | None = None
     # Optional embedded math check request for deterministic verification
@@ -105,6 +120,16 @@ class Claim(BaseModel):
         run = self.run_id or "unknown_run"
         return f"{proj}/{run}/{self.claim_id}/v{self.version}"
 
+    @property
+    def has_supporting_lineage(self) -> bool:
+        """True if claim cites evidence and/or a computation artifact."""
+        return bool(
+            self.evidence_ids
+            or self.calculation_ids
+            or self.computation_artifact_id
+            or (self.source and self.evidence)
+        )
+
     @model_validator(mode="after")
     def _assumptions_are_not_facts(self) -> Claim:
         if self.kind == EvidenceKind.FACT and not self.source and not self.evidence:
@@ -119,6 +144,15 @@ class Claim(BaseModel):
                 raise ValueError("mock:// sources must have source_trust=STUB")
             if self.kind == EvidenceKind.FACT:
                 raise ValueError("mock:// sources cannot be labeled FACT")
+        # Синхронизация: одиночный computation_artifact_id входит в calculation_ids.
+        if self.computation_artifact_id and self.computation_artifact_id not in self.calculation_ids:
+            self.calculation_ids = [*self.calculation_ids, self.computation_artifact_id]
+        # SUPPORTED без lineage запрещён — иначе synthesis мог бы принять голое утверждение.
+        if self.support_status == ClaimSupportStatus.SUPPORTED and not self.has_supporting_lineage:
+            raise ValueError(
+                "claim without evidence cannot become SUPPORTED "
+                "(need evidence_ids, calculation_ids, or source+evidence)"
+            )
         return self
 
 
@@ -614,14 +648,21 @@ class CalculationSpec(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     spec_id: str = Field(default_factory=lambda: _new_id("cspec"))
+    # PR-01 execution binding — foreign task/investigation must fail CONTEXT_MISMATCH.
+    project_id: str | None = None
+    investigation_id: str | None = None
     task_id: str | None = None
     run_id: str | None = None
+    contract_version: str | None = None
     objective: str = ""
     required_inputs: list[str] = Field(default_factory=list)
     required_outputs: list[str] = Field(default_factory=list)
     expected_dimensions: dict[str, str] = Field(
         default_factory=dict,
-        description="output_name → unit string (e.g. power → W)",
+        description=(
+            "output_name → Dimension name (length), legacy SI (L, L**2), "
+            "or Pint unit (m, W, Pa)"
+        ),
     )
     expected_relations: list[str] = Field(
         default_factory=list,
@@ -664,6 +705,15 @@ class EvidenceCompletenessReport(BaseModel):
     required_output_coverage: bool = True
     # V2.6.1: optional benchmark acceptance (True when no contract applies).
     acceptance_passed: bool = True
+    # PR-05: lineage + contract coverage (fail → INSUFFICIENT_EVIDENCE, not silent PASS).
+    lineage_ok: bool = True
+    contract_coverage_ok: bool = True
+    # PR-B: method/domain semantic contract (fiber calc ≠ shaft PASS).
+    method_compatible: bool = True
+    # PR-06 IterationController: covered / required outputs + ratio.
+    coverage_ratio: float | None = None
+    covered_outputs: list[str] = Field(default_factory=list)
+    missing_outputs: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
     relevance_results: list[ComputationRelevanceResult] = Field(default_factory=list)
     required_checks: int = 0
@@ -679,6 +729,9 @@ class EvidenceCompletenessReport(BaseModel):
             and self.provenance_complete
             and self.required_output_coverage
             and self.acceptance_passed
+            and self.lineage_ok
+            and self.contract_coverage_ok
+            and self.method_compatible
         )
 
 
@@ -804,6 +857,10 @@ class BlindClaimView(BaseModel):
     verification_spec: dict[str, Any] | None = None
     computation_artifact_id: str | None = None
     refs: list[str] = Field(default_factory=list)
+    # PR-05: reviewers see lineage/support without author confidence.
+    support_status: ClaimSupportStatus | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    calculation_ids: list[str] = Field(default_factory=list)
 
 
 class ReviewBundle(BaseModel):
@@ -811,6 +868,11 @@ class ReviewBundle(BaseModel):
 
     bundle_id: str = Field(default_factory=lambda: _new_id("rb"))
     run_id: str
+    # PR-01: bundle is run/investigation-scoped — never reuse across projects.
+    project_id: str | None = None
+    investigation_id: str | None = None
+    task_id: str | None = None
+    contract_version: str | None = None
     target_claim_ids: list[str] = Field(default_factory=list)
     claims: list[BlindClaimView] = Field(default_factory=list)
     computation_artifacts: list[dict[str, Any]] = Field(default_factory=list)
@@ -856,6 +918,13 @@ class ComputationArtifact(BaseModel):
 
     artifact_id: str = Field(default_factory=lambda: _new_id("comp"))
     run_id: str
+    # PR-01 lineage / isolation (optional on legacy artifacts; required on new writes).
+    project_id: str | None = None
+    investigation_id: str | None = None
+    parent_artifact_id: str | None = None
+    schema_version: str = "1"
+    created_at: datetime | None = None
+    contract_version: str | None = None
     kind: str = "simulation"  # simulation | calculation
     input_hash: str = "unknown"
     code_hash: str = "unknown"
@@ -897,6 +966,13 @@ class ComputationArtifact(BaseModel):
     declared_outputs: dict[str, Any] = Field(default_factory=dict)
     input_claim_ids: list[str] = Field(default_factory=list)
     output_claim_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _lineage_created_at(self) -> ComputationArtifact:
+        # created_at mirrors started_at when writers omit lineage timestamp.
+        if self.created_at is None:
+            self.created_at = self.started_at
+        return self
 
 
 class RunBudget(BaseModel):
@@ -961,6 +1037,9 @@ class RunManifest(BaseModel):
     # V2.8 investigation scope snapshot (locked contract). Optional for older manifests.
     investigation_scope: dict[str, Any] | None = None
     original_problem_hash: str | None = None
+    # PR-03 EngineeringContract snapshot (source of truth for the investigation).
+    engineering_contract: dict[str, Any] | None = None
+    engineering_contract_version: str | None = None
 
 
 class GraphNode(BaseModel):

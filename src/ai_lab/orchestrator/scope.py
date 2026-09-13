@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from ai_lab.core.enums import AssumptionKind, ScopeStatus
+from ai_lab.core.enums import AssumptionKind, ProblemKind, ScopeStatus
 from ai_lab.core.investigation import (
     ClarificationQuestion,
     ClarificationRecord,
@@ -18,6 +18,13 @@ from ai_lab.core.investigation import (
 )
 from ai_lab.core.models import HitlRequest
 from ai_lab.observability.logger import get_logger
+from ai_lab.orchestrator.scope_resolver import (
+    apply_specialized_second_stage,
+    finalize_scope_frame,
+    merge_clarification_answers_into_known,
+    pipeline_hint_for_kind,
+    try_kind_template_scope,
+)
 
 logger = get_logger(__name__)
 
@@ -138,6 +145,7 @@ def hitl_request_for_scope(scope: InvestigationScope) -> HitlRequest:
             "question": q.question,
             "why": q.why,
             "input_mode": q.input_mode,
+            "field": q.field,
             "scope_id": scope.scope_id,
             "round": scope.clarification_round,
             "original_problem": scope.original_problem,
@@ -153,11 +161,17 @@ def apply_clarification(
     answers: dict[str, str] | None = None,
 ) -> InvestigationScope:
     """Record the user answer without mutating original_problem."""
+    # Привязываем ответ к Required-field текущего вопроса — иначе resume теряет смысл.
+    field = scope.clarification.field if scope.clarification is not None else None
+    merged_answers = dict(answers or {})
+    if field and (choice or note) and field not in merged_answers:
+        merged_answers[field] = (choice or note or "").strip()
     record = ClarificationRecord(
         round=scope.clarification_round + 1,
         choice=choice,
         note=note or "",
-        answers=dict(answers or {}),
+        answers=merged_answers,
+        field=field,
     )
     return scope.model_copy(
         update={
@@ -197,6 +211,13 @@ def resolve_scope(
 
     if clarifications:
         scope = finalize_after_clarification(scope)
+
+    # ScopeResolver frame: problem_kind + Known/Required/Optional (HITL only for Required).
+    scope = finalize_scope_frame(scope)
+    if scope.pipeline_hint is None and scope.problem_kind is not None:
+        hint = pipeline_hint_for_kind(scope.problem_kind)
+        if hint is not None:
+            scope = scope.model_copy(update={"pipeline_hint": hint})
 
     if (
         scope.status == ScopeStatus.SCOPE_NEEDS_CLARIFICATION
@@ -245,6 +266,11 @@ def _heuristics(
     round_n: int,
 ) -> InvestigationScope:
     lower = blended.lower()
+
+    # PR-04 kind templates (closed rod stress, open-ended “stronger”) before legacy ones.
+    kind_hit = try_kind_template_scope(original, blended, clarifications, round_n)
+    if kind_hit is not None:
+        return kind_hit
 
     if _is_heater(lower):
         return _heater_scope(original, blended, clarifications, round_n)
@@ -304,6 +330,8 @@ def _heater_scope(
         )
 
     blocking = [u for u in unknown if u in {"t_initial", "t_final", "duration", "volume"}]
+    optional = [] if losses else ["losses"]
+    assumption_texts = [a.text for a in assumptions]
     if blocking:
         return InvestigationScope(
             original_problem=original,
@@ -314,8 +342,12 @@ def _heater_scope(
             key_terms=["heater", "water", "power", "heat capacity"],
             known_parameters=known,
             unknown_parameters=blocking,
+            required_fields=list(blocking),
+            optional_fields=optional,
+            assumption_candidates=assumption_texts,
             assumptions=assumptions,
             ambiguity=blocking,
+            problem_kind=ProblemKind.CLOSED_NUMERIC,
             pipeline_hint="calculation",
             status=ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
             clarification_round=round_n,
@@ -347,7 +379,11 @@ def _heater_scope(
         key_terms=["heater", "water", "power", "heat capacity"],
         known_parameters=known,
         unknown_parameters=[],
+        required_fields=[],
+        optional_fields=optional,
+        assumption_candidates=assumption_texts,
         assumptions=assumptions,
+        problem_kind=ProblemKind.CLOSED_NUMERIC,
         success_criteria=["Power in watts from Q=mcΔT and P=Q/t with explicit losses"],
         pipeline_hint="calculation",
         status=ScopeStatus.SCOPE_RESOLVED,
@@ -371,6 +407,10 @@ def _ambiguous_strength_scope(
         key_terms=["strength", "material"],
         ambiguity=["strength metric"],
         unknown_parameters=["strength_metric"],
+        required_fields=["strength_metric"],
+        optional_fields=["temperature", "specimen_geometry"],
+        assumption_candidates=[],
+        problem_kind=ProblemKind.OPEN_ENDED,
         pipeline_hint="research",
         status=ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
         clarification_round=round_n,
@@ -395,6 +435,7 @@ def _ambiguous_strength_scope(
                 "Все перечисленное",
             ],
             input_mode="choice",
+            field="strength_metric",
         ),
     )
 
@@ -427,6 +468,11 @@ def _research_scope(
             ],
             evidence_requirements=reqs,
             required_outputs=[],
+            required_fields=[],
+            optional_fields=["production_route", "host_organism"],
+            assumption_candidates=[
+                "No single commercial process is assumed; compare platforms",
+            ],
             success_criteria=[
                 "Cover manufacturing, spinning, properties, scale-up, and bottlenecks"
             ],
@@ -434,6 +480,7 @@ def _research_scope(
                 "detailed business plan",
                 "commercial market forecast",
             ],
+            problem_kind=ProblemKind.RESEARCH_REVIEW,
             pipeline_hint="research",
             status=ScopeStatus.SCOPE_RESOLVED,
             clarification_round=round_n,
@@ -456,6 +503,10 @@ def _research_scope(
         domain="research",
         key_terms=_key_terms(blended),
         evidence_requirements=reqs,
+        required_fields=[],
+        optional_fields=[],
+        assumption_candidates=[],
+        problem_kind=ProblemKind.RESEARCH_REVIEW,
         pipeline_hint="research",
         status=ScopeStatus.SCOPE_RESOLVED,
         clarification_round=round_n,
@@ -474,6 +525,10 @@ def _vague_scope(
         objective="",
         ambiguity=["subject", "required outputs"],
         unknown_parameters=["subject", "success_criteria"],
+        required_fields=["subject", "success_criteria"],
+        optional_fields=[],
+        assumption_candidates=[],
+        problem_kind=ProblemKind.OPEN_ENDED,
         pipeline_hint=None,
         status=ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
         clarification_round=round_n,
@@ -499,10 +554,14 @@ def _default_resolved(
 ) -> InvestigationScope:
     """Long, named problems (benchmarks) that do not match a special template."""
     first = original.strip().split("\n", 1)[0].strip("# ").strip()
+    # Kind заполняется в finalize_scope_frame, если шаблон не сработал.
     return InvestigationScope(
         original_problem=original,
         objective=first or "Formalize and investigate the posed engineering problem",
         key_terms=_key_terms(blended),
+        required_fields=[],
+        optional_fields=[],
+        assumption_candidates=[],
         pipeline_hint="mixed",
         status=ScopeStatus.SCOPE_RESOLVED,
         clarification_round=round_n,
@@ -593,12 +652,83 @@ def finalize_after_clarification(scope: InvestigationScope) -> InvestigationScop
         return scope
     last = scope.clarifications[-1]
     choice = last.choice or last.note
+    known = merge_clarification_answers_into_known(scope)
+
+    # OPEN_ENDED «прочнее» + load_type уже в known (этот или прошлый HITL):
+    # шаблон снова отдаёт OPEN_ENDED — продвигаем в DESIGN и гоняем второй этап.
+    # Нельзя RESOLVED / пустой required только из-за axial.
+    if (
+        scope.problem_kind == ProblemKind.OPEN_ENDED
+        and _field_in_known(known, "load_type")
+        and (
+            "load_type" in (scope.required_fields or [])
+            or "load_type" in (scope.unknown_parameters or [])
+            or last.field
+            in {"load_type", "strength_metric", "geometry", "design_constraint"}
+        )
+    ):
+        load_val = str(known.get("load_type") or "").strip()
+        promoted = scope.model_copy(
+            update={
+                "objective": (
+                    f"Propose how to strengthen the rod under {load_val} loading"
+                ),
+                "known_parameters": known,
+                "unknown_parameters": [
+                    u for u in scope.unknown_parameters if u != "load_type"
+                ],
+                # load_type снят; второй этап заново вычислит DESIGN Required.
+                "required_fields": [
+                    r for r in scope.required_fields if r != "load_type"
+                ],
+                "ambiguity": [a for a in scope.ambiguity if a != "load_type"],
+                "clarification": None,
+                "pipeline_hint": "mixed",
+                "problem_kind": ProblemKind.DESIGN,
+                "rationale": (
+                    f"Load type locked to {load_val}; promoting OPEN_ENDED → DESIGN. "
+                    "Second-stage Required must still be satisfied before READY."
+                ),
+                "status": ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
+                "locked": False,
+            }
+        )
+        return apply_specialized_second_stage(promoted)
+
+    # Уже DESIGN (или другой specialized): вливаем known и пересчитываем Required.
+    if scope.problem_kind in {
+        ProblemKind.DESIGN,
+        ProblemKind.RESEARCH_REVIEW,
+        ProblemKind.EXPERIMENTAL,
+        ProblemKind.PARAMETRIC,
+    }:
+        updated = scope.model_copy(
+            update={
+                "known_parameters": known,
+                "locked": False,
+            }
+        )
+        return apply_specialized_second_stage(updated)
+
     strengthish = (
         scope.domain == "materials"
         or "strength" in (scope.objective or "").lower()
         or "проч" in (scope.original_problem or "").lower()
     )
-    if strengthish and choice:
+    # Материалы «насколько прочен» → RESEARCH_REVIEW mapping.
+    # Не перехватывать DESIGN-only fields (geometry / design_constraint / load_type).
+    if strengthish and choice and scope.problem_kind != ProblemKind.DESIGN:
+        if last.field in {"geometry", "design_constraint", "load_type"}:
+            return apply_specialized_second_stage(
+                scope.model_copy(
+                    update={
+                        "known_parameters": known,
+                        "problem_kind": ProblemKind.DESIGN,
+                        "pipeline_hint": "mixed",
+                        "status": ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
+                    }
+                )
+            )
         objective, outputs, dims = strength_choice_to_outputs(choice)
         return scope.model_copy(
             update={
@@ -606,11 +736,14 @@ def finalize_after_clarification(scope: InvestigationScope) -> InvestigationScop
                 "required_outputs": outputs,
                 "expected_dimensions": dims,
                 "domain": "materials",
+                "known_parameters": known,
                 "status": ScopeStatus.SCOPE_RESOLVED,
                 "clarification": None,
                 "ambiguity": [],
                 "unknown_parameters": [],
+                "required_fields": [],
                 "pipeline_hint": "research",
+                "problem_kind": ProblemKind.RESEARCH_REVIEW,
                 "rationale": (
                     "The term “strength” was ambiguous. The investigation now "
                     f"focuses on: {objective}."
@@ -618,3 +751,7 @@ def finalize_after_clarification(scope: InvestigationScope) -> InvestigationScop
             }
         )
     return scope
+
+
+def _field_in_known(known: dict[str, str], name: str) -> bool:
+    return name in known and bool(str(known.get(name) or "").strip())

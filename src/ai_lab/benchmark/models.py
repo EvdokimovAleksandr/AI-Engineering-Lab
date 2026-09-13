@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ai_lab.task_routing.enums import EvalVerdict, WorkflowProfile
+
+
+class ExpectedBehavior(str, Enum):
+    """What the lab should do — not only numeric PASS (PR-07)."""
+
+    PASS = "PASS"
+    NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    FAIL = "FAIL"
+    # Routing / structure / honesty matter; numeric engineering PASS not required.
+    ORCHESTRATION_ONLY = "ORCHESTRATION_ONLY"
 
 
 class CategoryScore(BaseModel):
@@ -72,6 +84,15 @@ class BenchmarkExpectation(BaseModel):
     # V2.6.1 generic acceptance contract (empty ⇒ no numeric oracle).
     acceptance_outputs: list[OutputAcceptance] = Field(default_factory=list)
     acceptance_inputs: list[InputAcceptance] = Field(default_factory=list)
+    # PR-07: refusal / clarification / budget-stop expectations.
+    expected_behavior: ExpectedBehavior = ExpectedBehavior.PASS
+    # FailureClass.value when FAIL / INSUFFICIENT_EVIDENCE is the intended outcome.
+    expected_failure_class: str | None = None
+    expected_scope_status: str | None = None
+    expected_problem_kind: str | None = None
+    required_clarification_fields: list[str] = Field(default_factory=list)
+    # Optional mock simulation fixture for closed numeric PASS path (e.g. heater_correct).
+    simulation_fixture: str | None = None
 
 
 class EvaluationReport(BaseModel):

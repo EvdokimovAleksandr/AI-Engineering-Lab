@@ -5,7 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from ai_lab.checks.safe_eval import ForbiddenExpressionError, SafeExpressionEvaluator
-from ai_lab.checks.units import IncompatibleDimensionsError, UnitError, parse_quantity, to_pint
+from ai_lab.checks.units import (
+    IncompatibleDimensionsError,
+    UnitError,
+    expected_dimensionality,
+    parse_quantity,
+    to_pint,
+)
 from ai_lab.core.enums import SimulationStatus
 from ai_lab.observability.logger import get_logger
 from ai_lab.simulation.models import (
@@ -66,15 +72,17 @@ def _validate_parameters(spec: SimulationSpec) -> tuple[list[str], SimulationSta
             errors.append(f"parameter {name} must be nonzero")
         expected_unit = spec.expected_dimensions.get(name)
         if expected_unit:
-            try:
-                expected = parse_quantity(1.0, expected_unit)
-            except UnitError as exc:
-                errors.append(f"parameter {name} expected_dimension invalid: {exc}")
+            # Dimension names / legacy SI (L) resolve without treating L as litre.
+            exp_dim = expected_dimensionality(str(expected_unit))
+            if exp_dim is None:
+                errors.append(
+                    f"parameter {name} expected_dimension invalid: {expected_unit!r}"
+                )
                 continue
-            if pq.dimensionality != expected.dimensionality:
+            if pq.dimensionality != exp_dim:
                 errors.append(
                     f"parameter {name}: incompatible dimensions "
-                    f"{pq.dimensionality} vs expected {expected.dimensionality}"
+                    f"{pq.dimensionality} vs expected {exp_dim}"
                 )
     status = SimulationStatus.INVALID_PARAMETERS if errors else SimulationStatus.SUCCESS
     return errors, status

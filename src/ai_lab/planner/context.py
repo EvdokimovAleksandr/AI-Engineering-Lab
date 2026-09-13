@@ -22,6 +22,9 @@ class ProblemContext:
     # V2.8: immutable user prompt vs locked investigation objective.
     original_problem: str = ""
     resolved_objective: str = ""
+    # PR-04: TaskGraph = f(EngineeringContract) — planner sees contract summary.
+    contract_summary: str = ""
+    contract_version: str = ""
 
     def untrusted_payload(self) -> str:
         """Serialize project files as a clearly delimited DATA block."""
@@ -34,6 +37,8 @@ class ProblemContext:
             original,
             "--- resolved_scope.objective ---",
             self.resolved_objective or "",
+            "--- engineering_contract.summary ---",
+            self.contract_summary or "",
             "--- problem.md ---",
             self.problem_text,
             "--- requirements.md ---",

@@ -21,7 +21,12 @@ REPO = Path(__file__).resolve().parents[1]
 def test_list_three_benchmarks() -> None:
     specs = list_benchmarks(REPO)
     ids = {s.benchmark_id for s in specs}
-    assert ids == {"simple_heater", "shaft_design", "spider_silk_review"}
+    assert ids == {
+        "simple_heater",
+        "shaft_design",
+        "spider_silk_review",
+        "ambiguous_rod_strength",
+    }
     assert get_benchmark(REPO, "simple_heater").expectation.expected_workflow == WorkflowProfile.SIMPLE
 
 
@@ -30,7 +35,7 @@ def test_list_ignores_dot_workspace(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     benches = root / "benchmarks"
     benches.mkdir(parents=True)
-    for bid in ("simple_heater", "shaft_design", "spider_silk_review"):
+    for bid in ("simple_heater", "shaft_design", "spider_silk_review", "ambiguous_rod_strength"):
         d = benches / bid
         d.mkdir()
         for name in ("problem.md", "expected_capabilities.md", "evaluation.md"):
@@ -38,7 +43,12 @@ def test_list_ignores_dot_workspace(tmp_path: Path) -> None:
     (benches / ".workspace").mkdir()
     (benches / ".workspace" / "simple_heater").mkdir()
     ids = {s.benchmark_id for s in list_benchmarks(root)}
-    assert ids == {"simple_heater", "shaft_design", "spider_silk_review"}
+    assert ids == {
+        "simple_heater",
+        "shaft_design",
+        "spider_silk_review",
+        "ambiguous_rod_strength",
+    }
     assert ".workspace" not in ids
 
 

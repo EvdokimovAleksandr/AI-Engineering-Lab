@@ -16,8 +16,10 @@ from ai_lab.core.enums import (
     AdjudicationStatus,
     AgentRole,
     AgreementType,
+    ContractStatus,
     GraphEdgeType,
     GraphNodeType,
+    IterationAction,
     ProjectState,
     ResearchOutcome,
     ScopeStatus,
@@ -25,6 +27,16 @@ from ai_lab.core.enums import (
     TaskStatus,
 )
 from ai_lab.core.investigation import InvestigationScope, ResearchSufficiencyReport
+from ai_lab.core.engineering_contract import (
+    EngineeringContract,
+    active_contract_version,
+    contract_from_investigation_scope,
+    lock_contract,
+    require_pipeline_allowed,
+    require_spec_matches_contract_version,
+    stamp_task_graph_to_contract,
+)
+from ai_lab.core.execution_context import UNSET_CONTRACT_VERSION
 from ai_lab.core.models import (
     AgentResult,
     HitlRequest,
@@ -59,7 +71,11 @@ from ai_lab.observability.tracing import RunEventSink
 from ai_lab.orchestrator.adjudication import adjudicate
 from ai_lab.orchestrator.budget import BudgetExceeded, budget_from_config, check_budget
 from ai_lab.orchestrator.hitl import HitlGate
-from ai_lab.orchestrator.iteration_policy import next_iteration_state
+from ai_lab.orchestrator.iteration_policy import (
+    IterationController,
+    observation_from_adjudication,
+    next_iteration_state,
+)
 from ai_lab.orchestrator.scope import (
     apply_clarification,
     hitl_request_for_scope,
@@ -114,6 +130,11 @@ class LabRuntime:
             self.run_id = resume_run_id
         else:
             self.run_id = f"run_{uuid4().hex[:12]}"
+        # PR-01: run-level isolation anchor (investigation_id == project folder today).
+        self._run_project_id = project.name
+        self._run_investigation_id = project.name
+        self._resume_context_anchor = None
+        self._engineering_contract: EngineeringContract | None = None
         events_dir = repo_root / str(config.observability.get("run_events_dir", ".runs"))
         self.sink = RunEventSink(events_dir / f"{self.run_id}.jsonl")
         self.budget = budget_from_config(config)
@@ -138,6 +159,19 @@ class LabRuntime:
         self.decisions = DecisionLog(project.root / "decisions" / "decision_log.jsonl")
         self.graph = self.knowledge.graph  # JsonEvidenceRepository
         self.run_store = RunStore(project, self.run_id)
+        # PR-03: resume anchor after RunStore exists so we can load the locked contract.
+        if self._is_resume:
+            from ai_lab.core.execution_context import ExecutionContext
+
+            prior_contract = self._load_contract()
+            self._engineering_contract = prior_contract
+            self._resume_context_anchor = ExecutionContext.for_project_run(
+                project_id=self._run_project_id,
+                investigation_id=self._run_investigation_id,
+                task_id="__resume__",
+                run_id=self.run_id,
+                contract_version=active_contract_version(prior_contract),
+            )
         self.llm = create_llm_router(
             config,
             cwd=None,  # never bind Cursor to project root
@@ -187,6 +221,11 @@ class LabRuntime:
         # V2.8 investigation scope (locked after the scope gate).
         self._investigation_scope: InvestigationScope | None = None
         self._last_research_sufficiency: ResearchSufficiencyReport | None = None
+        # PR-06: no-progress detection (не поднимает max_tokens / max_cost).
+        self._iteration_controller = IterationController.from_runtime_config(
+            dict(config.runtime or {})
+        )
+        self._last_iteration_decision = None
 
     def _stage_for_task(self, task: TaskSpec) -> str:
         """Map a TaskGraph node to a UI pipeline stage from real task metadata."""
@@ -285,6 +324,8 @@ class LabRuntime:
                 "calculation_specs": list(getattr(self, "_calculation_specs", None) or []),
                 "relevance_results": list(getattr(self, "_relevance_results", None) or []),
                 "investigation_scope": self._investigation_scope,
+                # PR-B: SimulationAgent читает контракт для MethodCompatibilityGate.
+                "engineering_contract": self._engineering_contract,
                 "research_sufficiency": self._last_research_sufficiency,
             },
         )
@@ -306,6 +347,22 @@ class LabRuntime:
             original = self._investigation_scope.original_problem
             resolved = self._investigation_scope.objective
             extra["resolved_scope.json"] = self._investigation_scope.model_dump_json()
+        contract_summary = ""
+        contract_version = ""
+        if self._engineering_contract is not None:
+            c = self._engineering_contract
+            from ai_lab.orchestrator.scope_resolver import contract_summary_text
+
+            contract_summary = contract_summary_text(
+                problem_kind=c.problem_kind,
+                objective=c.objective.statement,
+                required_outputs=[o.name for o in c.required_outputs],
+                required_fields=list(c.required),
+                version=c.version,
+                status=c.status.value,
+            )
+            contract_version = c.version
+            extra["engineering_contract.json"] = c.model_dump_json()
         return ProblemContext(
             project_id=self.project.name,
             run_id=self.run_id,
@@ -317,6 +374,8 @@ class LabRuntime:
             extra_data=extra,
             original_problem=original,
             resolved_objective=resolved,
+            contract_summary=contract_summary,
+            contract_version=contract_version,
         )
 
     def _original_problem_text(self) -> str:
@@ -349,6 +408,57 @@ class LabRuntime:
         except FileNotFoundError:
             logger.info("Scope saved as planner artifact (manifest not yet written)")
 
+    def _persist_contract(self, contract: EngineeringContract) -> None:
+        """Persist versioned EngineeringContract under the run planner artifacts."""
+        self._engineering_contract = contract
+        payload = contract.public_dump()
+        # Current pointer + immutable version snapshot (audit / resume).
+        self.run_store.save_planner_json("engineering_contract.json", payload)
+        self.run_store.save_planner_json(
+            f"engineering_contract_v{contract.version}.json", payload
+        )
+        try:
+            manifest = self.run_store.load_manifest()
+            manifest.engineering_contract = payload
+            manifest.engineering_contract_version = contract.version
+            self.run_store.save_manifest(manifest)
+        except FileNotFoundError:
+            logger.info("EngineeringContract saved as planner artifact (manifest not yet written)")
+
+    def _load_contract(self) -> EngineeringContract | None:
+        path = self.project.root / self.run_store.rel("planner", "engineering_contract.json")
+        if not path.is_file():
+            return None
+        import json as _json
+
+        return EngineeringContract.model_validate(_json.loads(path.read_text(encoding="utf-8")))
+
+    def _sync_contract_from_scope(self, scope: InvestigationScope) -> EngineeringContract:
+        """Evolve scope → contract (same HITL); preserve version on resume when possible."""
+        prior = self._engineering_contract or self._load_contract()
+        version = prior.version if prior is not None else "1"
+        contract_id = prior.contract_id if prior is not None else None
+        # If prior was LOCKED and scope still matches, keep LOCKED pointer.
+        if (
+            prior is not None
+            and prior.status == ContractStatus.LOCKED
+            and prior.scope_id == scope.scope_id
+            and prior.objective.statement == (scope.objective or "").strip()
+            and scope.locked
+        ):
+            self._engineering_contract = prior
+            return prior
+        contract = contract_from_investigation_scope(
+            scope,
+            project_id=self._run_project_id,
+            investigation_id=self._run_investigation_id,
+            run_id=self.run_id,
+            version=version,
+            contract_id=contract_id,
+        )
+        self._persist_contract(contract)
+        return contract
+
     def _load_scope(self) -> InvestigationScope | None:
         path = self.project.root / self.run_store.rel("planner", "scope.json")
         if not path.is_file():
@@ -361,7 +471,11 @@ class LabRuntime:
         return int(self.config.runtime.get("max_clarification_rounds", 2))
 
     async def _resolve_and_gate_scope(self) -> InvestigationScope:
-        """Scope gate before TaskRouter/Planner. May raise _HitlInterrupt."""
+        """Scope gate before TaskRouter/Planner. May raise _HitlInterrupt.
+
+        After scope locks, EngineeringContract becomes READY→LOCKED for the run
+        (PR-03). Pipeline stages must not start on DRAFT / NEEDS_CLARIFICATION.
+        """
         original = self._original_problem_text()
         prior = self._load_scope()
         if prior is not None and prior.original_problem != original:
@@ -374,14 +488,21 @@ class LabRuntime:
             max_clarification_rounds=self._max_clarification_rounds(),
         )
         self._persist_scope(scope)
+        # Persist contract even while clarifying — status NEEDS_CLARIFICATION blocks pipeline.
+        self._sync_contract_from_scope(scope)
         self._emit_lifecycle(
             "scope.resolved",
             stage="SCOPE_RESOLUTION",
             status=scope.status.value,
             locked=scope.locked,
             objective=scope.objective,
+            contract_version=active_contract_version(self._engineering_contract),
+            contract_status=(
+                self._engineering_contract.status.value if self._engineering_contract else None
+            ),
         )
         while scope.status == ScopeStatus.SCOPE_NEEDS_CLARIFICATION:
+            self._sync_contract_from_scope(scope)
             req = hitl_request_for_scope(scope)
             decision = self.hitl.request(req)
             if not decision.approved:
@@ -390,6 +511,11 @@ class LabRuntime:
                     status="warn",
                     stage="SCOPE_RESOLUTION",
                     question=(scope.clarification.question if scope.clarification else req.reason),
+                    contract_status=(
+                        self._engineering_contract.status.value
+                        if self._engineering_contract
+                        else None
+                    ),
                 )
                 raise _HitlInterrupt(req)
             scope = apply_clarification(
@@ -404,12 +530,34 @@ class LabRuntime:
                 max_clarification_rounds=self._max_clarification_rounds(),
             )
             self._persist_scope(scope)
+            self._sync_contract_from_scope(scope)
         if scope.status in {ScopeStatus.SCOPE_RESOLVED, ScopeStatus.SCOPE_ASSUMED}:
             scope = lock_scope(scope)
             self._persist_scope(scope)
-            self._emit_lifecycle("stage.completed", stage="SCOPE_RESOLUTION")
+            # Scope locked → contract READY minimum met → LOCKED for this run.
+            contract = self._sync_contract_from_scope(scope)
+            if contract.status == ContractStatus.LOCKED:
+                pass  # resume: already immutable for this run
+            elif contract.status == ContractStatus.READY:
+                contract = lock_contract(contract, where="scope_gate")
+                self._persist_contract(contract)
+            else:
+                logger.error(
+                    "Resolved scope produced non-READY contract status=%s",
+                    contract.status.value,
+                )
+                raise RuntimeError(
+                    f"EngineeringContract not READY after scope lock: {contract.status.value}"
+                )
+            self._emit_lifecycle(
+                "stage.completed",
+                stage="SCOPE_RESOLUTION",
+                contract_version=contract.version,
+                contract_status=contract.status.value,
+            )
             return scope
         if scope.status == ScopeStatus.SCOPE_UNRESOLVED:
+            self._sync_contract_from_scope(scope)
             self._emit_lifecycle(
                 "scope.unresolved",
                 status="warn",
@@ -628,6 +776,10 @@ class LabRuntime:
         extra = {}
         if scope is not None and scope.pipeline_hint:
             extra["pipeline_hint"] = scope.pipeline_hint
+        if scope is not None and scope.problem_kind is not None:
+            extra["problem_kind"] = scope.problem_kind.value
+        elif self._engineering_contract is not None and self._engineering_contract.problem_kind:
+            extra["problem_kind"] = self._engineering_contract.problem_kind.value
         route_ctx = ProblemContext(
             project_id=full_ctx.project_id,
             run_id=full_ctx.run_id,
@@ -639,8 +791,40 @@ class LabRuntime:
             extra_data=extra,
             original_problem=full_ctx.original_problem,
             resolved_objective=full_ctx.resolved_objective,
+            contract_summary=full_ctx.contract_summary,
+            contract_version=full_ctx.contract_version,
         )
         decision = router.route(route_ctx)
+        # Raise-only floors by problem_kind (совместимо с TaskRoutingPolicy).
+        from ai_lab.core.enums import ProblemKind
+        from ai_lab.task_routing.enums import WorkflowProfile
+        from ai_lab.task_routing.policy import WORKFLOW_RANK, max_workflow
+
+        kind = None
+        if scope is not None:
+            kind = scope.problem_kind
+        if kind is None and self._engineering_contract is not None:
+            kind = self._engineering_contract.problem_kind
+        if kind == ProblemKind.RESEARCH_REVIEW:
+            raised = max_workflow(decision.final_workflow, WorkflowProfile.RESEARCH)
+            if raised != decision.final_workflow:
+                decision = decision.model_copy(
+                    update={
+                        "final_workflow": raised,
+                        "policy_escalated": True,
+                        "notes": list(decision.notes)
+                        + ["problem_kind RESEARCH_REVIEW raised workflow to RESEARCH"],
+                    }
+                )
+        elif kind == ProblemKind.CLOSED_NUMERIC:
+            # Prefer SIMPLE via classifier; never lower an already-raised profile.
+            if WORKFLOW_RANK[decision.final_workflow] <= WORKFLOW_RANK[WorkflowProfile.SIMPLE]:
+                decision = decision.model_copy(
+                    update={
+                        "notes": list(decision.notes)
+                        + ["problem_kind CLOSED_NUMERIC keeps SIMPLE-band workflow"],
+                    }
+                )
         self._routing_decision = decision
         self.run_store.save_planner_json("task_routing.json", decision.public_dump())
         try:
@@ -669,17 +853,36 @@ class LabRuntime:
     async def _prepare_task_graph(self) -> TaskGraph:
         """Scope gate → Router (optional) → planner proposes; only a validated DAG is executed."""
         await self._resolve_and_gate_scope()
+        # PR-03: refuse TaskGraph / research / calculation until contract READY|LOCKED.
+        require_pipeline_allowed(
+            self._engineering_contract, where="prepare_task_graph"
+        )
         self._route_task()
         pipeline_override = self._resolve_pipeline_for_planner()
         planner = create_planner(
             self.config, llm=self.llm, pipeline_override=pipeline_override
         )
         context = self._problem_context()
+        contract = self._engineering_contract
+        require_calc = bool(
+            self._routing_decision is not None and self._routing_decision.require_calculation
+        )
         vctx = TaskGraphValidationContext(
             budget=self.budget,
             routing_policy=self.routing_policy,
             independence_policy=self.independence_policy,
             available_providers=KNOWN_PROVIDER_IDS,
+            contract_version=active_contract_version(contract)
+            if contract is not None
+            else None,
+            # Soft during propose: mismatch fails, missing stamp allowed until stamp_*.
+            contract_status=None,
+            investigation_id=contract.investigation_id if contract is not None else None,
+            required_outputs=[o.name for o in contract.required_outputs]
+            if contract is not None
+            else [],
+            require_calculation_producers=require_calc
+            and bool(contract and contract.required_outputs),
         )
         # Fallback profile follows TaskRouter, not a hardcoded STANDARD graph.
         fallback_pipeline = pipeline_override or str(
@@ -749,6 +952,39 @@ class LabRuntime:
                 raise _HitlInterrupt(req)
 
         graph_hash = validation.graph_hash or task_graph_hash(graph)
+        # PR-04: TaskGraph = f(EngineeringContract) — stamp then re-validate binding.
+        if self._engineering_contract is not None:
+            graph = stamp_task_graph_to_contract(graph, self._engineering_contract)
+            bind_check = validate_task_graph(
+                graph,
+                TaskGraphValidationContext(
+                    budget=self.budget,
+                    routing_policy=self.routing_policy,
+                    independence_policy=self.independence_policy,
+                    available_providers=KNOWN_PROVIDER_IDS,
+                    contract_version=self._engineering_contract.version,
+                    contract_status=self._engineering_contract.status,
+                    investigation_id=self._engineering_contract.investigation_id,
+                    required_outputs=[
+                        o.name for o in self._engineering_contract.required_outputs
+                    ],
+                    require_calculation_producers=bool(
+                        self._routing_decision is not None
+                        and self._routing_decision.require_calculation
+                        and self._engineering_contract.required_outputs
+                    ),
+                ),
+            )
+            if not bind_check.ok:
+                logger.error(
+                    "TaskGraph contract binding failed: %s %s",
+                    bind_check.reason.value,
+                    bind_check.errors,
+                )
+                raise RuntimeError(
+                    f"TaskGraph invalid: {bind_check.reason.value}: {bind_check.errors}"
+                )
+            graph_hash = bind_check.graph_hash or task_graph_hash(graph)
         self._task_graph = graph
         self._task_statuses = {t.task_id: TaskStatus.PENDING for t in graph.tasks}
         self.run_store.attach_task_graph(
@@ -810,8 +1046,25 @@ class LabRuntime:
         agent = self.agents.get(task.role)
         if agent is None:
             raise KeyError(f"No agent registered for role {task.role}")
+        from ai_lab.core.execution_context import (
+            require_artifact_context,
+            resume_execution_context,
+        )
+
+        # PR-01: per-task immutable binding — investigation_id == project folder today.
+        # PR-03: contract_version from active EngineeringContract (not "unset" when present).
+        exec_ctx = resume_execution_context(
+            project_id=self._run_project_id,
+            investigation_id=self._run_investigation_id,
+            task_id=task.task_id,
+            run_id=self.run_id,
+            contract_version=active_contract_version(self._engineering_contract),
+            previous=self._resume_context_anchor if self._is_resume else None,
+        )
         ctx = self._ctx()
+        ctx.execution_context = exec_ctx
         ctx.extra["task_id"] = task.task_id
+        ctx.extra["execution_context"] = exec_ctx
         ctx.extra["independence_group"] = task.independence_group
         ctx.extra["frozen_blind_bundle"] = task.role in REVIEW_ROLES
         ctx.extra["parallel_review"] = task.role in REVIEW_ROLES
@@ -837,6 +1090,12 @@ class LabRuntime:
             for spec in incoming_specs:
                 sid = getattr(spec, "spec_id", None)
                 if sid and sid not in existing_ids:
+                    # Refuse foreign specs before they pollute the run.
+                    require_artifact_context(
+                        exec_ctx,
+                        spec,
+                        where=f"CalculationSpec[{sid}]",
+                    )
                     self._calculation_specs.append(spec)
                     existing_ids.add(sid)
             incoming_rels = ctx.extra.get("relevance_results") or []
@@ -1068,12 +1327,18 @@ class LabRuntime:
     async def _after_adjudication(
         self, engine: WorkflowEngine, adj_status: AdjudicationStatus
     ) -> None:
-        """Verdict handling. TaskStatus stays SUCCESS; IterationPolicy is unchanged.
+        """Verdict handling. TaskStatus stays SUCCESS; IterationController gates re-entry.
 
         V2.6: SIMPLE quantitative runs still execute synthesis so the report can
         honestly show INSUFFICIENT_EVIDENCE/FAIL. Technical COMPLETED ≠ PASS.
+
+        PR-06: одинаковые missing outputs / failure_class без роста coverage_ratio
+        → REPLAN один раз, затем STOP_INSUFFICIENT_EVIDENCE (или ASK_USER),
+        не дожидаясь BUDGET_EXCEEDED.
         """
         if adj_status == AdjudicationStatus.PASS:
+            # Фиксируем прогресс для истории итераций (coverage полный).
+            self._record_iteration_progress(budget_exceeded=False)
             return
         graph = self._task_graph
         if graph is None:
@@ -1095,8 +1360,51 @@ class LabRuntime:
                 ResearchOutcome.RESEARCH_PARTIAL,
                 ResearchOutcome.RESEARCH_PROVIDER_ERROR,
             }
-        if simple_path or research_terminal:
-            # Leave synthesis PENDING so grounded (non-PASS) report is written.
+        # Missing evidence is a gap: another calculation loop cannot invent
+        # method names / sources. Do not burn max_iterations on the same FAIL.
+        insufficient_terminal = adj_status == AdjudicationStatus.INSUFFICIENT_EVIDENCE
+        max_reentries = int(self.config.runtime.get("max_graph_reentries", 3))
+        reentry_exhausted = int(engine.snapshot.iteration or 0) >= max_reentries
+
+        decision = self._record_iteration_progress(budget_exceeded=False)
+        self._last_iteration_decision = decision
+
+        # STOP_* / ASK_USER от контроллера — раньше бюджета, честный engineering outcome.
+        if decision.action == IterationAction.STOP_BUDGET:
+            self.stop_reason = decision.reason
+            engine.set_state(ProjectState.BUDGET_EXCEEDED)
+            return
+        if decision.action == IterationAction.STOP_INSUFFICIENT_EVIDENCE:
+            self._apply_stop_insufficient(decision.reason, decision.failure_class)
+            logger.info(
+                "IterationController STOP_INSUFFICIENT_EVIDENCE: %s (failure_class=%s)",
+                decision.reason,
+                decision.failure_class.value if decision.failure_class else None,
+            )
+            return
+        if decision.action == IterationAction.ASK_USER:
+            self._apply_ask_user_no_progress(engine, decision)
+            return
+
+        # REPLAN — один широкий re-entry даже если обычный cap исчерпан.
+        allow_replan = decision.action == IterationAction.REPLAN
+        if (
+            simple_path
+            or research_terminal
+            or insufficient_terminal
+            or (reentry_exhausted and not allow_replan)
+        ):
+            logger.info(
+                "Adjudication %s is terminal (simple=%s research=%s insufficient=%s "
+                "reentries=%s/%s replan=%s); leaving synthesis pending",
+                adj_status.value,
+                simple_path,
+                research_terminal,
+                insufficient_terminal,
+                engine.snapshot.iteration,
+                max_reentries,
+                allow_replan,
+            )
             return
 
         for task in graph.tasks:
@@ -1106,6 +1414,8 @@ class LabRuntime:
             ):
                 self._task_statuses[task.task_id] = TaskStatus.SKIPPED
         engine.snapshot.iteration += 1
+
+        replan = decision.action == IterationAction.REPLAN
         if adj_status == AdjudicationStatus.DISPUTED and self.config.runtime.get(
             "hitl_on_disputed", True
         ):
@@ -1116,25 +1426,33 @@ class LabRuntime:
                     and self._last_red_team.max_severity.value in {"HIGH", "CRITICAL"}
                 )
             ):
-                decision = self.hitl.request(
+                hitl_decision = self.hitl.request(
                     HitlRequest(
                         reason="Adjudication DISPUTED with critical red-team findings",
                         options=["iterate", "accept_risk_and_synthesize", "abort"],
                         context={"adjudication": adj_status.value},
                     )
                 )
-                if decision.approved and decision.choice == "accept_risk_and_synthesize":
+                if hitl_decision.approved and hitl_decision.choice == "accept_risk_and_synthesize":
                     for task in graph.tasks:
                         if task.state_context == ProjectState.SYNTHESIS:
                             self._task_statuses[task.task_id] = TaskStatus.PENDING
                     return
-                if decision.approved and decision.choice == "iterate":
+                if hitl_decision.approved and hitl_decision.choice == "iterate":
                     nxt = next_iteration_state(
                         adjudication=self._last_adjudication,
                         verification=self._last_verification,
                         check_report=self._last_check_report,
+                        failure_class=decision.failure_class,
+                        replan=replan,
                     )
-                    self._reenter_graph(nxt, reason=f"hitl_iterate:{adj_status.value}")
+                    self._reenter_graph(
+                        nxt,
+                        reason=(
+                            f"hitl_iterate:{'replan:' if replan else ''}"
+                            f"{adj_status.value}"
+                        ),
+                    )
                     return
                 raise _HitlInterrupt(
                     HitlRequest(
@@ -1143,12 +1461,103 @@ class LabRuntime:
                         context={"adjudication": adj_status.value},
                     )
                 )
+
         nxt = next_iteration_state(
             adjudication=self._last_adjudication,
             verification=self._last_verification,
             check_report=self._last_check_report,
+            failure_class=decision.failure_class,
+            replan=replan,
         )
-        self._reenter_graph(nxt, reason=f"adjudication:{adj_status.value}")
+        tag = "replan" if replan else "adjudication"
+        self._reenter_graph(nxt, reason=f"{tag}:{adj_status.value}:{decision.reason[:120]}")
+
+    def _record_iteration_progress(self, *, budget_exceeded: bool):
+        """Снимок coverage/missing/failure_class → IterationDecision + persist."""
+        rs_outcome = None
+        if self._last_research_sufficiency is not None:
+            rs_outcome = self._last_research_sufficiency.outcome
+        obs = observation_from_adjudication(
+            adjudication=self._last_adjudication,
+            evidence=self._last_evidence_completeness,
+            research_outcome=rs_outcome,
+            budget_exceeded=budget_exceeded,
+        )
+        decision = self._iteration_controller.record_and_decide(obs)
+        # Лёгкая персистенция прогресса на run (не второй budget ledger).
+        payload = {
+            "history": self._iteration_controller.dump_history(),
+            "last_decision": decision.model_dump(mode="json"),
+        }
+        try:
+            self.run_store.save_review_json("iteration_progress.json", payload)
+        except Exception as exc:
+            logger.error("Failed to persist iteration_progress.json: %s", exc)
+            raise
+        return decision
+
+    def _apply_stop_insufficient(self, reason: str, failure_class) -> None:
+        """STOP_INSUFFICIENT_EVIDENCE → честный engineering outcome, не fake PASS."""
+        self.stop_reason = reason
+        if self._last_adjudication is None:
+            logger.error("STOP_INSUFFICIENT without adjudication: %s", reason)
+            raise RuntimeError(f"STOP_INSUFFICIENT_EVIDENCE without adjudication: {reason}")
+        self._last_adjudication.status = AdjudicationStatus.INSUFFICIENT_EVIDENCE
+        self._last_adjudication.engineering_outcome = AdjudicationStatus.INSUFFICIENT_EVIDENCE
+        self._last_adjudication.reasons = list(self._last_adjudication.reasons) + [
+            reason,
+            f"failure_class={failure_class.value if failure_class else 'UNKNOWN'}",
+        ]
+        dumped = self._last_adjudication.model_dump(mode="json")
+        self.project.write_json("reviews/last_adjudication.json", dumped)
+        self.run_store.save_review_json("last_adjudication.json", dumped)
+
+    def _apply_ask_user_no_progress(self, engine: WorkflowEngine, decision) -> None:
+        """HITL после REPLAN без прогресса (runtime.iteration.hitl_on_no_progress)."""
+        hitl_decision = self.hitl.request(
+            HitlRequest(
+                reason=decision.reason,
+                options=["stop_insufficient", "iterate_anyway", "abort"],
+                context={
+                    "failure_class": (
+                        decision.failure_class.value if decision.failure_class else None
+                    ),
+                    "iteration_action": decision.action.value,
+                },
+            )
+        )
+        if hitl_decision.approved and hitl_decision.choice == "iterate_anyway":
+            nxt = next_iteration_state(
+                adjudication=self._last_adjudication,
+                verification=self._last_verification,
+                check_report=self._last_check_report,
+                failure_class=decision.failure_class,
+                replan=True,
+            )
+            if self._task_graph is not None:
+                for task in self._task_graph.tasks:
+                    if (
+                        task.state_context == ProjectState.SYNTHESIS
+                        and self._task_statuses.get(task.task_id) == TaskStatus.PENDING
+                    ):
+                        self._task_statuses[task.task_id] = TaskStatus.SKIPPED
+                engine.snapshot.iteration += 1
+            self._reenter_graph(nxt, reason=f"hitl_no_progress:{decision.reason[:80]}")
+            return
+        if hitl_decision.approved and hitl_decision.choice == "stop_insufficient":
+            self._apply_stop_insufficient(decision.reason, decision.failure_class)
+            return
+        raise _HitlInterrupt(
+            HitlRequest(
+                reason=decision.reason,
+                options=["stop_insufficient", "iterate_anyway", "abort"],
+                context={
+                    "failure_class": (
+                        decision.failure_class.value if decision.failure_class else None
+                    ),
+                },
+            )
+        )
 
     def _reenter_graph(self, nxt: ProjectState, *, reason: str) -> None:
         """Extension point: IterationPolicy target becomes TaskGraph vN."""
@@ -1174,13 +1583,17 @@ class LabRuntime:
         if engine.snapshot.adjudication_status == AdjudicationStatus.DISPUTED:
             engine.set_state(ProjectState.DISPUTED)
             return
-        # SIMPLE: synthesis after non-PASS still completes technically.
+        # SIMPLE / INSUFFICIENT: write the report and stop. Do not sit in
+        # ITERATION_REQUIRED until max_iterations expires.
         simple_path = (
             self._routing_decision is not None
             and not self._routing_decision.require_independent_review
         )
+        honest_stop = simple_path or (
+            engine.snapshot.adjudication_status == AdjudicationStatus.INSUFFICIENT_EVIDENCE
+        )
         if (
-            simple_path
+            honest_stop
             and engine.snapshot.adjudication_status is not None
             and synthesis
             and all(
@@ -1244,7 +1657,14 @@ class LabRuntime:
             self._last_simulation_spec = spec
         result = run_simulation(
             spec,
-            SolverContext(run_id=self.run_id, task_id=task.task_id, repo_root=self.repo_root),
+            SolverContext(
+                run_id=self.run_id,
+                task_id=task.task_id,
+                project_id=self._run_project_id,
+                investigation_id=self._run_investigation_id,
+                contract_version=active_contract_version(self._engineering_contract),
+                repo_root=self.repo_root,
+            ),
             run_store=self.run_store,
         )
         self._last_simulation_result = result
@@ -1252,7 +1672,16 @@ class LabRuntime:
         self.project.write_json(rel, result.model_dump(mode="json"))
         self.project.write_json("simulations/last_result.json", result.model_dump(mode="json"))
         vspecs = verification_specs_from_simulation(spec, result)
-        claims = claims_from_simulation(spec, result, verification_specs=vspecs)
+        claims = claims_from_simulation(
+            spec,
+            result,
+            verification_specs=vspecs,
+            project_id=self._run_project_id,
+            investigation_id=self._run_investigation_id,
+            task_id=task.task_id,
+            run_id=self.run_id,
+            contract_version=active_contract_version(self._engineering_contract),
+        )
         claim_ids: list[str] = []
         sim_node = self.graph.ensure_node(
             node_type=GraphNodeType.SIMULATION,
@@ -1329,10 +1758,12 @@ class LabRuntime:
         comps = [a.model_dump(mode="json") for a in self.run_store.list_computations()]
 
         async def _exec(code: str) -> dict:
+            # Ephemeral math-check recompute — must not persist incomplete ComputationArtifacts.
             return await self.tools.call(
                 "python.execute",
                 allowed=["python.execute"],
                 code=code,
+                persist_computation=False,
             )
 
         from ai_lab.memory.review_bundle import claim_to_blind_view
@@ -1350,6 +1781,8 @@ class LabRuntime:
             claims=claims,
             computation_artifacts=comps,
             check_report=check_report,
+            project_id=self.project.name,
+            investigation_id=self.project.name,
         )
         bundle_path = "reviews/review_bundle.json"
         self.project.write_json(bundle_path, bundle.model_dump(mode="json"))
@@ -1392,19 +1825,50 @@ class LabRuntime:
         from ai_lab.core.models import CalculationSpec, VerificationPolicy
 
         # Reload specs from disk (agent may have written them) + in-memory.
+        from ai_lab.core.execution_context import ExecutionContext, require_context_match
+
         specs = list(self._calculation_specs)
         spec_dir = self.project.root / self.run_store.rel("planner", "calculation_specs")
         if spec_dir.is_dir():
             import json as _json
 
             for path in sorted(spec_dir.glob("*.json")):
-                # Skip soft-failed invalid_* proposals — they must not count as contracts.
-                if path.name.startswith("invalid_"):
+                # Soft-failed invalid_* / incompatible_* — не считать валидным контрактом.
+                if path.name.startswith("invalid_") or path.name.startswith("incompatible_"):
                     continue
                 try:
-                    specs.append(CalculationSpec.model_validate(_json.loads(path.read_text(encoding="utf-8"))))
+                    loaded = CalculationSpec.model_validate(_json.loads(path.read_text(encoding="utf-8")))
                 except Exception as exc:
                     logger.error("Failed to load CalculationSpec %s: %s", path, exc)
+                    continue
+                # PR-01: refuse foreign project/run specs (sofa vs rod) before completeness.
+                # PR-03: stamp/check contract_version against active EngineeringContract.
+                active_cv = active_contract_version(self._engineering_contract)
+                try:
+                    require_context_match(
+                        ExecutionContext.for_project_run(
+                            project_id=self.project.name,
+                            investigation_id=self.project.name,
+                            task_id=loaded.task_id or "calculation",
+                            run_id=self.run_id,
+                            contract_version=active_cv,
+                        ),
+                        project_id=loaded.project_id,
+                        investigation_id=loaded.investigation_id,
+                        run_id=loaded.run_id,
+                        contract_version=loaded.contract_version,
+                        where=f"CalculationSpec.load:{path.name}",
+                    )
+                    require_spec_matches_contract_version(
+                        active_version=active_cv,
+                        spec_contract_version=loaded.contract_version,
+                        where=f"CalculationSpec.load:{path.name}",
+                        hard=True,
+                    )
+                except Exception as exc:
+                    logger.error("Rejecting cross-context CalculationSpec %s: %s", path, exc)
+                    raise
+                specs.append(loaded)
         # Deduplicate by spec_id
         by_id = {s.spec_id: s for s in specs}
         specs = list(by_id.values())
@@ -1494,7 +1958,76 @@ class LabRuntime:
             output_aliases=output_aliases,
             acceptance_passed=acceptance_passed,
             acceptance_reasons=acceptance_reasons,
+            # PR-05: contract required outputs → coverage gate (INSUFFICIENT_EVIDENCE if missing).
+            required_contract_outputs=(
+                [o.name for o in self._engineering_contract.required_outputs]
+                if self._engineering_contract is not None
+                else None
+            ),
+            execution_context=ExecutionContext.for_project_run(
+                project_id=self.project.name,
+                investigation_id=self.project.name,
+                task_id="adjudication",
+                run_id=self.run_id,
+                contract_version=active_contract_version(self._engineering_contract),
+            ),
+            # PR-B: method/domain gate — fiber calc cannot PASS shaft/rod.
+            engineering_contract=self._engineering_contract,
+            investigation_scope=self._investigation_scope,
+            original_problem=self._original_problem_text(),
+            problem_objective=(
+                self._engineering_contract.objective.statement
+                if self._engineering_contract is not None
+                else (
+                    self._investigation_scope.objective
+                    if self._investigation_scope is not None
+                    else None
+                )
+            ),
+            declared_domain=(
+                (
+                    self._engineering_contract.scope.domain
+                    if self._engineering_contract is not None
+                    else None
+                )
+                or (
+                    self._investigation_scope.domain
+                    if self._investigation_scope is not None
+                    else None
+                )
+            ),
         )
+        # PR-B: soft-dropped incompatible_* specs всё равно блокируют PASS (audit trail).
+        if spec_dir.is_dir():
+            import json as _json
+
+            incompat_reasons: list[str] = []
+            for path in sorted(spec_dir.glob("incompatible_*.json")):
+                try:
+                    payload = _json.loads(path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    logger.error("Failed reading incompatible spec %s: %s", path, exc)
+                    incompat_reasons.append(f"unreadable incompatible spec {path.name}")
+                    continue
+                compat = payload.get("compatibility") if isinstance(payload, dict) else None
+                if isinstance(compat, dict):
+                    incompat_reasons.extend(str(r) for r in (compat.get("reasons") or []))
+                elif isinstance(payload, dict) and payload.get("error"):
+                    incompat_reasons.append(str(payload["error"]))
+            if incompat_reasons:
+                reasons = list(completeness.reasons) + list(dict.fromkeys(incompat_reasons))
+                completeness = completeness.model_copy(
+                    update={
+                        "method_compatible": False,
+                        "computation_relevant": False,
+                        "reasons": reasons,
+                    }
+                )
+                logger.error(
+                    "MethodCompatibilityGate: incompatible CalculationSpec on disk blocks PASS (%s)",
+                    [p.name for p in spec_dir.glob("incompatible_*.json")],
+                )
+
         self._last_evidence_completeness = completeness
         self.run_store.save_review_json(
             "evidence_completeness.json", completeness.model_dump(mode="json")
@@ -1844,6 +2377,7 @@ async def run_project(
     auto_approve_hitl: bool = False,
     resume: bool = False,
     problem_override: str | None = None,
+    simulation_fixture: str | None = None,
 ) -> ProjectSnapshot:
     root = repo_root_from_here()
     config = load_config(config_path or (root / "config" / "default.yaml"))
@@ -1860,9 +2394,10 @@ async def run_project(
         hitl=HitlGate(auto_approve=auto_approve_hitl),
         resume_run_id=resume_id,
         problem_override=problem_override,
+        # Test/benchmark hook only — never from untrusted UI JSON.
+        simulation_fixture=simulation_fixture,
     )
     return await runtime.run()
-
 
 async def plan_project(
     project_name: str,

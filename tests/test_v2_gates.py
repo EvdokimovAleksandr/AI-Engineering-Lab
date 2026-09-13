@@ -98,6 +98,8 @@ async def test_verification_catches_planted_calculation_error(tmp_path: Path) ->
             "tolerance": 1e-9,
             "inputs": {},
         },
+        investigation_id="proj",
+        task_id="task_test",
     )
     evidence.save_claim(claim, subdirectory="calculations")
 
@@ -226,7 +228,13 @@ def test_computation_artifact_immutable(tmp_path: Path) -> None:
     store = ProjectStore(proj)
     store.ensure_layout()
     rs = RunStore(store, "run_immut")
-    art = ComputationArtifact(run_id="run_immut", code="print(1)")
+    art = ComputationArtifact(
+        run_id="run_immut",
+        project_id="p",
+        investigation_id="p",
+        task_id="task_test",
+        code="print(1)",
+    )
     rs.save_computation(art)
     with pytest.raises(FileExistsError):
         rs.save_computation(art)
@@ -279,6 +287,8 @@ async def test_verification_and_red_team_isolation(tmp_path: Path) -> None:
             run_id="run_iso",
             project_id="iso",
             math_check={"expression": "1+1", "expected": 2.0, "tolerance": 1e-9, "inputs": {}},
+            investigation_id="iso",
+            task_id="task_test",
         ),
         subdirectory="calculations",
     )
@@ -304,9 +314,9 @@ def test_claim_superseding(tmp_path: Path) -> None:
     store = ProjectStore(proj)
     store.ensure_layout()
     ev = EvidenceStore(store, run_id="run_sup")
-    c1 = Claim(statement="v1", kind=EvidenceKind.ASSUMPTION, run_id="run_sup", project_id="p")
+    c1 = Claim(statement="v1", kind=EvidenceKind.ASSUMPTION, run_id="run_sup", project_id="p", investigation_id="p", task_id="task_test")
     ev.save_claim(c1, subdirectory="research")
-    c2 = Claim(statement="v2", kind=EvidenceKind.ASSUMPTION, run_id="run_sup", project_id="p")
+    c2 = Claim(statement="v2", kind=EvidenceKind.ASSUMPTION, run_id="run_sup", project_id="p", investigation_id="p", task_id="task_test")
     ev.supersede_claim(c1.claim_id, c2, subdirectory="research")
     old = ev.load_claim(c1.claim_id)
     new = ev.load_claim(c2.claim_id)

@@ -166,6 +166,12 @@ class SimulationSpec(BaseModel):
     parameter_provenance: dict[str, ParameterProvenance] = Field(default_factory=dict)
     # UQ is an extension point — do not pretend it is implemented.
     uncertainty: dict[str, Any] = Field(default_factory=lambda: {"supported": False})
+    # PR-01 execution binding (optional on trusted fixtures; stamped at runtime).
+    project_id: str | None = None
+    investigation_id: str | None = None
+    task_id: str | None = None
+    run_id: str | None = None
+    contract_version: str | None = None
 
     @field_validator("model_type")
     @classmethod

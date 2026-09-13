@@ -337,15 +337,28 @@ class StaticPlanner:
         # repair_errors is LLM-retry only; static graphs are rebuilt from the problem.
         del repair_errors
         tasks = self._tasks()
+        meta: dict = {
+            "planner": self.name,
+            "pipeline": self.pipeline,
+            "project_id": context.project_id,
+        }
+        # Минимальная привязка к контракту на этапе proposal (validator дошивает LOCKED).
+        if context.contract_version:
+            meta["contract_version"] = context.contract_version
+        if context.contract_summary:
+            meta["contract_summary"] = context.contract_summary
+        stamped = []
+        for row in tasks_to_proposal_dicts(tasks):
+            tmeta = dict(row.get("metadata") or {})
+            if context.contract_version:
+                tmeta["contract_version"] = context.contract_version
+            row["metadata"] = tmeta
+            stamped.append(row)
         return TaskGraphProposal(
             graph_id=self.graph_id,
-            tasks=tasks_to_proposal_dicts(tasks),
+            tasks=stamped,
             version=1,
-            metadata={
-                "planner": self.name,
-                "pipeline": self.pipeline,
-                "project_id": context.project_id,
-            },
+            metadata=meta,
         )
 
     def graph(self, context: ProblemContext) -> TaskGraph:

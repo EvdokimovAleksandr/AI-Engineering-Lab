@@ -178,7 +178,13 @@ class PythonExecTool:
         inputs = kwargs.pop("inputs", None) or {}
         if not isinstance(inputs, dict):
             raise SandboxValidationError("python.execute inputs must be a dict")
+        # PR-C: identity fields for ComputationArtifact — required when persisting.
         task_id = kwargs.pop("task_id", None)
+        project_id = kwargs.pop("project_id", None)
+        investigation_id = kwargs.pop("investigation_id", None)
+        contract_version = kwargs.pop("contract_version", None)
+        # Math-check / ephemeral recompute must not invent incomplete artifacts on disk.
+        persist_computation = bool(kwargs.pop("persist_computation", True))
         if "timeout_seconds" in kwargs and "timeout_s" not in kwargs:
             kwargs["timeout_s"] = kwargs.pop("timeout_seconds")
         else:
@@ -188,9 +194,26 @@ class PythonExecTool:
         context = SandboxContext(
             run_id=self.run_id or (self.run_store.run_id if self.run_store is not None else "orphan"),
             task_id=str(task_id) if task_id else None,
+            project_id=str(project_id) if project_id else None,
+            investigation_id=str(investigation_id) if investigation_id else (
+                str(project_id) if project_id else None
+            ),
+            contract_version=str(contract_version) if contract_version else None,
             workspace_parent=self._workspace_parent(),
             tool_name=self.name,
         )
+        will_persist = persist_computation and self.run_store is not None
+        # Fail early when this invocation will persist — incomplete identity is forbidden.
+        if will_persist:
+            from ai_lab.core.execution_context import require_full_execution_identity
+
+            require_full_execution_identity(
+                project_id=context.project_id,
+                investigation_id=context.investigation_id,
+                task_id=context.task_id,
+                run_id=context.run_id,
+                where="python.execute",
+            )
         reap = getattr(self.sandbox, "reap_stale_containers", None)
         if callable(reap):
             # Resume/crash: старый container не trusted state; новый invocation.
@@ -198,7 +221,7 @@ class PythonExecTool:
         result = await self.sandbox.execute(spec, context)
         artifact = result.artifact
         saved = False
-        if artifact is not None and self.run_store is not None:
+        if artifact is not None and will_persist:
             try:
                 self.run_store.save_computation(artifact)
                 saved = True

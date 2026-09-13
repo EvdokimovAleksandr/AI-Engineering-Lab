@@ -32,6 +32,21 @@ Adjudication        (deterministic FAIL cannot become PASS; empty checks ≠ PAS
 V2.6 adds a **CalculationSpec** contract and evidence-completeness gate before adjudication.
 See [benchmark-integrity.md](benchmark-integrity.md).
 
+## Dimension vs Pint (PR-02)
+
+Contract identity is semantic `Dimension` (`length`, `mass`, `area`, `pressure`, …) in
+`ai_lab.checks.units`. Mapping: **Dimension → reference SI unit → Pint dimensionality**.
+
+| Token in `expected_dimensions` | Meaning |
+|---|---|
+| `length`, `area`, `power`, … | `Dimension` enum — compare via reference unit (`m`, `m**2`, `W`) |
+| `m`, `Pa`, `W`, `liter` | Real Pint units |
+| `L`, `L**2`, `M`, `T` | Legacy SI base letters (Chief) → LENGTH / AREA / MASS / TIME **before** Pint |
+
+**Choice:** interpret legacy letters as Dimension (fixes false FAIL `expected L, got m`).
+Do **not** pass expected `L` through `parse_quantity` — Pint would treat it as litre.
+On *actual* `declared_outputs`, bare `L` remains litre.
+
 ## Numerical policy
 
 - IEEE-754 **float64**

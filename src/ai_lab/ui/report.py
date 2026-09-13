@@ -357,12 +357,20 @@ def build_result_view(
     else:
         summary = narrative or _fallback_summary(engineering_outcome, key_numbers, missing)
 
+    # PR-07: surface MODE so MOCK stub research ≠ LIVE research failure in UI.
+    from ai_lab.benchmark.mode import execution_mode_from_provider
+
+    provider = str(manifest.get("model_provider") or "unknown")
+    execution_mode = execution_mode_from_provider(provider)
+
     payload = {
         "run_id": run_id,
         "project_id": store.name,
         "lifecycle_status": life_status,
         "final_state": manifest.get("final_state") or snapshot.state.value,
         "engineering_outcome": engineering_outcome,
+        "execution_mode": execution_mode,
+        "provider": provider,
         "report_gate": report_gate,
         "hitl_required": snapshot.state.value == "AWAITING_HUMAN",
         "error": run_error,

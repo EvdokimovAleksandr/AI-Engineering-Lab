@@ -186,6 +186,10 @@ class SandboxContext:
 
     run_id: str
     task_id: str | None = None
+    # PR-C: full ExecutionContext fields so ComputationArtifact is complete at first write.
+    project_id: str | None = None
+    investigation_id: str | None = None
+    contract_version: str | None = None
     # Родитель каталога workspace: .runs/<run_id>/sandbox/ — не project root.
     workspace_parent: Path | None = None
     tool_name: str = "python.execute"

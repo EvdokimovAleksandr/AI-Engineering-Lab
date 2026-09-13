@@ -290,6 +290,9 @@ def test_llm_cannot_weaken_verification_policy() -> None:
             "verification_required": False,
         },
         task_id="calculation",
+        run_id="run_bench",
+        project_id="proj_bench",
+        investigation_id="proj_bench",
         policy=policy,
     )
     assert spec is not None
@@ -313,6 +316,9 @@ def test_llm_cannot_override_locked_dimensions() -> None:
             "expected_dimensions": {"power": "GiB"},
         },
         task_id="calculation",
+        run_id="run_bench",
+        project_id="proj_bench",
+        investigation_id="proj_bench",
         policy=policy,
     )
     assert spec is not None
@@ -343,6 +349,9 @@ def test_understanding_outputs_lock_offtopic_spec() -> None:
             "expected_dimensions": {"delta_L_m": "m"},
         },
         task_id="calculation",
+        run_id="run_bench",
+        project_id="proj_bench",
+        investigation_id="proj_bench",
         policy=policy,
     )
     assert spec is not None

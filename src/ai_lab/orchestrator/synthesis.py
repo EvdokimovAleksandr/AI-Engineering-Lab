@@ -10,7 +10,7 @@ from ai_lab.checks.calculation_contract import (
     claim_has_verified_computation_provenance,
     passed_claim_ids_from_report,
 )
-from ai_lab.core.enums import AdjudicationStatus, EvidenceKind
+from ai_lab.core.enums import AdjudicationStatus, ClaimSupportStatus, EvidenceKind
 from ai_lab.core.models import (
     AdjudicationResult,
     Claim,
@@ -30,6 +30,15 @@ _QUANTITATIVE_KINDS = {
     EvidenceKind.EXPERIMENT_RESULT,
 }
 
+# PR-05: эти статусы никогда не входят в accepted quantitative results.
+_SYNTHESIS_BLOCKED_SUPPORT = frozenset(
+    {
+        ClaimSupportStatus.UNVERIFIED,
+        ClaimSupportStatus.CONTRADICTED,
+        ClaimSupportStatus.REJECTED,
+    }
+)
+
 
 def _claim_public(claim: Claim) -> dict:
     return {
@@ -41,6 +50,9 @@ def _claim_public(claim: Claim) -> dict:
         "version": claim.version,
         "refs": claim.refs,
         "computation_artifact_id": claim.computation_artifact_id,
+        "support_status": claim.support_status.value,
+        "evidence_ids": list(claim.evidence_ids or []),
+        "calculation_ids": list(claim.calculation_ids or []),
     }
 
 
@@ -78,19 +90,76 @@ def validate_synthesis_grounding(
                 f"non-quantitative claim {claim.claim_id} excluded from accepted results"
             )
             continue
-        if claim_has_verified_computation_provenance(
-            claim, check_report=check_report, passed_claim_ids=passed_ids
-        ):
-            accepted.append(claim)
-        else:
+        # PR-05: UNVERIFIED / CONTRADICTED / REJECTED — не quantitative truth.
+        if claim.support_status in _SYNTHESIS_BLOCKED_SUPPORT:
             rejected.append(claim)
             caveats.append(
-                f"rejected ungrounded quantitative claim {claim.claim_id} "
-                "(missing verified computation provenance)"
+                f"rejected claim {claim.claim_id} with support_status="
+                f"{claim.support_status.value} (not proven for synthesis)"
             )
             logger.error(
-                "Synthesis rejected ungrounded quantitative claim %s", claim.claim_id
+                "Synthesis rejected blocked support_status claim %s (%s)",
+                claim.claim_id,
+                claim.support_status.value,
             )
+            continue
+        # PROPOSED без lineage / без verified check — не proven (усиливаем, не ослабляем).
+        if claim.support_status == ClaimSupportStatus.PROPOSED:
+            if not claim.has_supporting_lineage:
+                rejected.append(claim)
+                caveats.append(
+                    f"rejected PROPOSED claim {claim.claim_id} without evidence lineage"
+                )
+                logger.error(
+                    "Synthesis rejected PROPOSED claim %s without lineage", claim.claim_id
+                )
+                continue
+            if not claim_has_verified_computation_provenance(
+                claim, check_report=check_report, passed_claim_ids=passed_ids
+            ):
+                rejected.append(claim)
+                caveats.append(
+                    f"rejected PROPOSED claim {claim.claim_id} "
+                    "(needs verified computation to count as proven)"
+                )
+                logger.error(
+                    "Synthesis rejected unproven PROPOSED claim %s", claim.claim_id
+                )
+                continue
+            accepted.append(claim)
+            continue
+        if claim.support_status in {
+            ClaimSupportStatus.SUPPORTED,
+            ClaimSupportStatus.WEAKLY_SUPPORTED,
+        }:
+            if not claim.has_supporting_lineage:
+                rejected.append(claim)
+                caveats.append(
+                    f"rejected claim {claim.claim_id} without evidence/calculation lineage"
+                )
+                logger.error(
+                    "Synthesis rejected claim %s without lineage", claim.claim_id
+                )
+                continue
+            if claim_has_verified_computation_provenance(
+                claim, check_report=check_report, passed_claim_ids=passed_ids
+            ):
+                accepted.append(claim)
+            else:
+                rejected.append(claim)
+                caveats.append(
+                    f"rejected ungrounded quantitative claim {claim.claim_id} "
+                    "(missing verified computation provenance)"
+                )
+                logger.error(
+                    "Synthesis rejected ungrounded quantitative claim %s", claim.claim_id
+                )
+            continue
+        rejected.append(claim)
+        caveats.append(
+            f"rejected claim {claim.claim_id} with unexpected support_status="
+            f"{claim.support_status.value}"
+        )
     return accepted, rejected, caveats
 
 

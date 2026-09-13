@@ -4,20 +4,21 @@ LLM may **propose** work. It must not **execute** work.
 
 ```text
 original_problem (immutable)
-  → Scope Resolution (orchestrator / Chief Engineer capability — not a new AgentRole)
-  → Clarification HITL if SCOPE_NEEDS_CLARIFICATION
-  → locked resolved_scope
-  → Task Router (uses resolved objective, not a fresh reinterpretation of the raw prompt)
-  → Planner (StaticPlanner | LLMPlanner)
+  → ScopeResolver (problem kind + Known/Required/Optional; not a new AgentRole)
+  → Clarification HITL if Required blocks READY (specific fields only)
+  → EngineeringContract READY|LOCKED
+  → Task Router (resolved objective + problem_kind floors; raise-only)
+  → Planner (StaticPlanner | LLMPlanner) — receives contract_summary
   → TaskGraphProposal          # untrusted
   → parse (forbidden fields)
+  → stamp contract_version onto graph/tasks
   → TaskGraph
-  → deterministic validator
+  → deterministic validator (incl. CONTRACT_BINDING_VIOLATION)
   → approved TaskGraph
   → LabRuntime
 ```
 
-If scope is unresolved, LabRuntime does **not** build an execution TaskGraph.
+If scope/contract is unresolved (`NEEDS_CLARIFICATION` / `OPEN_ENDED` without Required), LabRuntime does **not** build an execution TaskGraph.
 
 V2.7.2 planner recovery (invalid DAG → one LLM retry → StaticPlanner) is unchanged and is **not** the research query-refinement loop.
 

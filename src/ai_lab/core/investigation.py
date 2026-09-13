@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ai_lab.core.enums import AssumptionKind, ResearchOutcome, ScopeStatus
+from ai_lab.core.enums import AssumptionKind, ProblemKind, ResearchOutcome, ScopeStatus
 
 
 def _utc_now() -> datetime:
@@ -51,6 +51,8 @@ class ClarificationQuestion(BaseModel):
     options: list[str] = Field(default_factory=list)
     # "choice" uses options; "text" expects a free-form note (e.g. missing temperatures).
     input_mode: str = "choice"
+    # Какой Required-field закрывает этот вопрос (для multi-step scope / resume).
+    field: str | None = None
 
 
 class ClarificationRecord(BaseModel):
@@ -60,6 +62,8 @@ class ClarificationRecord(BaseModel):
     choice: str | None = None
     note: str = ""
     answers: dict[str, str] = Field(default_factory=dict)
+    # Required-field, на который дан ответ (копируется из ClarificationQuestion.field).
+    field: str | None = None
     applied_at: datetime = Field(default_factory=_utc_now)
 
 
@@ -88,6 +92,11 @@ class InvestigationScope(BaseModel):
     out_of_scope: list[str] = Field(default_factory=list)
     known_parameters: dict[str, str] = Field(default_factory=dict)
     unknown_parameters: list[str] = Field(default_factory=list)
+    # PR-04 ScopeResolver frame — ask HITL only for Required that block READY.
+    required_fields: list[str] = Field(default_factory=list)
+    optional_fields: list[str] = Field(default_factory=list)
+    assumption_candidates: list[str] = Field(default_factory=list)
+    problem_kind: ProblemKind | None = None
     status: ScopeStatus = ScopeStatus.SCOPE_UNRESOLVED
     locked: bool = False
     # High-level rationale for the UI — not a hidden chain-of-thought transcript.

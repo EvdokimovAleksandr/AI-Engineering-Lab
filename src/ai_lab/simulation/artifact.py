@@ -29,6 +29,10 @@ def in_process_artifact(
     spec: SimulationSpec,
     outputs: dict[str, Quantity],
     solver_id: str,
+    project_id: str | None = None,
+    investigation_id: str | None = None,
+    task_id: str | None = None,
+    contract_version: str | None = None,
 ) -> ComputationArtifact:
     """Reproducibility metadata for a fully deterministic in-process solve.
 
@@ -78,6 +82,10 @@ def in_process_artifact(
     result_dump = {name: qty.model_dump(mode="json") for name, qty in outputs.items()}
     return ComputationArtifact(
         run_id=run_id,
+        project_id=project_id,
+        investigation_id=investigation_id,
+        task_id=task_id,
+        contract_version=contract_version,
         kind="simulation",
         tool_version=SOLVER_TOOL_VERSION,
         status="ok",

@@ -137,6 +137,8 @@ class TaskGraphValidationReason(str, Enum):
     ROUTING_VIOLATION = "ROUTING_VIOLATION"
     UNKNOWN_SOLVER = "UNKNOWN_SOLVER"
     SOLVER_POLICY_VIOLATION = "SOLVER_POLICY_VIOLATION"
+    # PR-04: TaskGraph must bind to EngineeringContract (version / investigation).
+    CONTRACT_BINDING_VIOLATION = "CONTRACT_BINDING_VIOLATION"
 
 
 class DecisionStatus(str, Enum):
@@ -241,12 +243,59 @@ class GraphEdgeType(str, Enum):
 
 
 class ClaimLifecycle(str, Enum):
+    """Persistence / history state of a claim record (not epistemic support).
+
+    Mapping vs ClaimSupportStatus (PR-05):
+    - ACTIVE ↔ any support_status except REJECTED (still in the run store)
+    - REJECTED ↔ support_status REJECTED (or lifecycle demotion after reject)
+    - DISPUTED ↔ support_status CONTRADICTED (or open conflict)
+    - SUPERSEDED / ARCHIVED / DEMOTED — history only; support_status frozen on the version
+    """
+
     ACTIVE = "ACTIVE"
     SUPERSEDED = "SUPERSEDED"
     REJECTED = "REJECTED"
     DISPUTED = "DISPUTED"
     ARCHIVED = "ARCHIVED"
     DEMOTED = "DEMOTED"
+
+
+class ClaimSupportStatus(str, Enum):
+    """Epistemic / synthesis gate for a claim — distinct from ClaimLifecycle.
+
+    Synthesis must not treat PROPOSED / UNVERIFIED as proven quantitative truth.
+    SUPPORTED requires evidence_ids and/or calculation_ids (fail loud otherwise).
+
+    Mapping onto existing enums (no duplicate truth):
+    - EvidenceKind = *what* the statement is (FACT, CALCULATION, …)
+    - ClaimLifecycle = store lifecycle (ACTIVE, SUPERSEDED, …)
+    - VerificationStatus / CheckStatus = agent / numeric check outcomes
+    - ClaimSupportStatus = whether the claim may enter grounded synthesis
+    """
+
+    PROPOSED = "PROPOSED"
+    SUPPORTED = "SUPPORTED"
+    WEAKLY_SUPPORTED = "WEAKLY_SUPPORTED"
+    CONTRADICTED = "CONTRADICTED"
+    UNVERIFIED = "UNVERIFIED"
+    REJECTED = "REJECTED"
+
+
+class EvidenceType(str, Enum):
+    """Provenance class of supporting evidence (attach to EvidenceRecord / source).
+
+    Compatible with SourceTrustTier (how much we trust) and EvidenceKind (claim shape):
+    LITERATURE ↔ retrieved source; CALCULATED ↔ ComputationArtifact;
+    SIMULATED ↔ simulation artifact; EXPERIMENTAL ↔ experiment;
+    ASSUMED ↔ typed assumption; USER_PROVIDED ↔ operator input.
+    """
+
+    LITERATURE = "LITERATURE"
+    EXPERIMENTAL = "EXPERIMENTAL"
+    CALCULATED = "CALCULATED"
+    SIMULATED = "SIMULATED"
+    ASSUMED = "ASSUMED"
+    USER_PROVIDED = "USER_PROVIDED"
 
 
 class ClaimVisibility(str, Enum):
@@ -444,3 +493,79 @@ class AssumptionKind(str, Enum):
     PARAMETER_ESTIMATE = "PARAMETER_ESTIMATE"
     SCOPE_ASSUMPTION = "SCOPE_ASSUMPTION"
     EVIDENCE_LIMITATION = "EVIDENCE_LIMITATION"
+
+
+class ContractStatus(str, Enum):
+    """EngineeringContract lifecycle. Distinct from ScopeStatus / ProjectState.
+
+    READY = defined enough to investigate (not “everything known”).
+    LOCKED = immutable for the active run; material change → new version.
+    """
+
+    DRAFT = "DRAFT"
+    NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
+    READY = "READY"
+    LOCKED = "LOCKED"
+
+
+class ProblemKind(str, Enum):
+    """ScopeResolver taxonomy — how the posed problem should be investigated.
+
+    Distinct from WorkflowProfile (depth) and TaskKind (graph node type).
+    Policy/validator are authority; LLM may only propose.
+    """
+
+    CLOSED_NUMERIC = "CLOSED_NUMERIC"
+    PARAMETRIC = "PARAMETRIC"
+    DESIGN = "DESIGN"
+    RESEARCH_REVIEW = "RESEARCH_REVIEW"
+    EXPERIMENTAL = "EXPERIMENTAL"
+    OPEN_ENDED = "OPEN_ENDED"
+
+
+class LabErrorCode(str, Enum):
+    """Stable machine-readable failure codes for deterministic lab gates.
+
+    Distinct from CheckStatus / AdjudicationStatus — these are runtime isolation
+    and contract errors, not engineering PASS/FAIL of a claim.
+    """
+
+    CONTEXT_MISMATCH = "CONTEXT_MISMATCH"
+    # New persisted writes must carry full project/investigation/task/run identity.
+    MISSING_EXECUTION_CONTEXT = "MISSING_EXECUTION_CONTEXT"
+    # Pipeline stages that need a contract must not run on DRAFT / NEEDS_CLARIFICATION.
+    CONTRACT_NOT_READY = "CONTRACT_NOT_READY"
+    # LOCKED contract cannot be mutated in place; use a version bump.
+    CONTRACT_LOCKED = "CONTRACT_LOCKED"
+    ILLEGAL_CONTRACT_TRANSITION = "ILLEGAL_CONTRACT_TRANSITION"
+
+
+class FailureClass(str, Enum):
+    """Taxonomy of why an iteration stalled (PR-06 stop/replan reasons).
+
+    Maps from LabErrorCode / ResearchOutcome / adjudication text where practical.
+    Dashboards / spider_silk 2.0 (PR-07) consume the same enum — do not fork.
+    """
+
+    USER_INPUT = "USER_INPUT"
+    SCOPE = "SCOPE"
+    PLANNING = "PLANNING"
+    CONTEXT = "CONTEXT"
+    UNIT = "UNIT"
+    CALCULATION = "CALCULATION"
+    SIMULATION = "SIMULATION"
+    RESEARCH = "RESEARCH"
+    VERIFICATION = "VERIFICATION"
+    BUDGET = "BUDGET"
+    PROVIDER = "PROVIDER"
+    INFRASTRUCTURE = "INFRASTRUCTURE"
+
+
+class IterationAction(str, Enum):
+    """Decision from IterationController after adjudication (PR-06)."""
+
+    CONTINUE = "CONTINUE"
+    REPLAN = "REPLAN"
+    ASK_USER = "ASK_USER"
+    STOP_INSUFFICIENT_EVIDENCE = "STOP_INSUFFICIENT_EVIDENCE"
+    STOP_BUDGET = "STOP_BUDGET"

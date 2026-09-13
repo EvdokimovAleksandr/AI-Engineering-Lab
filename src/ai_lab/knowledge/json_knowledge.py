@@ -85,16 +85,35 @@ class JsonKnowledgeRepository:
     def _save_global_index(self, index: dict[str, dict[str, str]]) -> None:
         self.store.write_json(self._global_index_rel(), index)
 
-    def save_claim(self, claim: Claim) -> Claim:
+    def save_claim(self, claim: Claim, *, legacy_migrate: bool = False) -> Claim:
+        from ai_lab.core.execution_context import (
+            ContextMismatchError,
+            require_write_execution_context,
+        )
+
         if claim.kind == EvidenceKind.FACT and not claim.source and not claim.evidence:
             raise ValueError("Refusing to store FACT without source/evidence")
-        if not claim.run_id:
-            raise ValueError("Claim must have run_id for run-scoped namespace")
-        if not claim.project_id:
-            claim.project_id = self.project_id
+        # PR-C: refuse incomplete identity — never auto-fill project/investigation/task.
+        require_write_execution_context(
+            claim,
+            where="JsonKnowledgeRepository.save_claim",
+            legacy_migrate=legacy_migrate,
+        )
         if claim.project_id != self.project_id:
-            raise ValueError(
-                f"Cross-project claim write forbidden: {claim.project_id} != {self.project_id}"
+            raise ContextMismatchError(
+                "Cross-project claim write forbidden",
+                field="project_id",
+                expected=self.project_id,
+                actual=claim.project_id,
+                where="JsonKnowledgeRepository.save_claim",
+            )
+        if claim.investigation_id != self.project_id:
+            raise ContextMismatchError(
+                "Cross-investigation claim write forbidden",
+                field="investigation_id",
+                expected=self.project_id,
+                actual=claim.investigation_id,
+                where="JsonKnowledgeRepository.save_claim",
             )
         if not claim.content_hash:
             claim.content_hash = claim_content_hash(
@@ -179,18 +198,30 @@ class JsonKnowledgeRepository:
             ]
         return sorted(claims, key=lambda c: c.claim_id)
 
-    def supersede_claim(self, old_claim_id: str, new_claim: Claim) -> Claim:
+    def supersede_claim(
+        self,
+        old_claim_id: str,
+        new_claim: Claim,
+        *,
+        legacy_migrate: bool = False,
+    ) -> Claim:
         old = self.get_claim(old_claim_id, run_id=new_claim.run_id or None)
         if old.lifecycle == ClaimLifecycle.SUPERSEDED or old.superseded_by:
             raise ValueError(f"Claim {old_claim_id} already superseded by {old.superseded_by}")
+        # Inherit identity from the superseded claim when the writer omitted fields —
+        # still subject to require_write_execution_context (no inventing new ids).
         if not new_claim.run_id:
             new_claim.run_id = old.run_id
         if not new_claim.project_id:
-            new_claim.project_id = old.project_id or self.project_id
+            new_claim.project_id = old.project_id
+        if not new_claim.investigation_id:
+            new_claim.investigation_id = old.investigation_id
+        if not new_claim.task_id:
+            new_claim.task_id = old.task_id
         new_claim.supersedes = old_claim_id
         new_claim.version = int(old.version) + 1
         new_claim.lifecycle = ClaimLifecycle.ACTIVE
-        saved = self.save_claim(new_claim)
+        saved = self.save_claim(new_claim, legacy_migrate=legacy_migrate)
         # Metadata-only update on old claim (lifecycle pointer) — allowed exception
         old.superseded_by = saved.claim_id
         old.lifecycle = ClaimLifecycle.SUPERSEDED

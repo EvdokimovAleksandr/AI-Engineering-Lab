@@ -96,6 +96,24 @@ class SimulationAgent(BaseAgent):
         calc_spec = None
         relevance = None
         contract_error: str | None = None
+        from ai_lab.core.execution_context import (
+            ContextMismatchError,
+            ExecutionContext,
+            context_binding_dict,
+            require_artifact_context,
+        )
+
+        exec_ctx = ctx.execution_context
+        if exec_ctx is None:
+            exec_ctx = ExecutionContext.for_project_run(
+                project_id=ctx.store.name,
+                investigation_id=ctx.store.name,
+                task_id=task.task_id,
+                run_id=ctx.run_id,
+            )
+        elif not isinstance(exec_ctx, ExecutionContext):
+            exec_ctx = ExecutionContext.model_validate(exec_ctx)
+
         if is_calculation or payload.get("calculation_spec"):
             raw_spec = (
                 payload.get("calculation_spec")
@@ -107,8 +125,14 @@ class SimulationAgent(BaseAgent):
                     raw_spec,
                     task_id=task.task_id,
                     run_id=ctx.run_id,
+                    project_id=ctx.store.name,
+                    investigation_id=ctx.store.name,
                     policy=policy,
+                    execution_context=exec_ctx,
                 )
+            except ContextMismatchError:
+                # Isolation errors must abort — never soft-fail into a foreign domain.
+                raise
             except ValueError as exc:
                 # Invalid LLM shape must not abort the whole lab run.
                 contract_error = str(exc)
@@ -138,12 +162,49 @@ class SimulationAgent(BaseAgent):
                         )
                     calc_spec = None
 
+            # PR-B: MethodCompatibilityGate до sandbox — чужой метод не исполняем как валидный контракт.
+            if calc_spec is not None:
+                from ai_lab.checks.method_compatibility import (
+                    check_method_compatibility,
+                    problem_frame_from_agent_context,
+                )
+
+                frame = problem_frame_from_agent_context(ctx)
+                compat = check_method_compatibility(calc_spec, frame)
+                if not compat.compatible:
+                    contract_error = (
+                        f"MethodCompatibilityGate: {compat.codes}: {compat.reasons}"
+                    )
+                    logger.error("%s", contract_error)
+                    if ctx.run_store is not None:
+                        ctx.run_store.save_planner_json(
+                            f"calculation_specs/incompatible_{calc_spec.spec_id}.json",
+                            {
+                                "error": contract_error,
+                                "compatibility": compat.model_dump(mode="json"),
+                                "proposal": calc_spec.model_dump(mode="json"),
+                                "problem_frame": frame.model_dump(mode="json"),
+                            },
+                        )
+                    # Контракт снят — execution без binding не даёт PASS (completeness).
+                    calc_spec = None
+
+        # Hard gate before sandbox: spec must belong to this task/run/investigation.
+        if calc_spec is not None:
+            require_artifact_context(exec_ctx, calc_spec, where="CalculationSpec.pre_execute")
+
+        # Stamp identity before execute so ComputationArtifact is complete on first disk write.
+        binding = context_binding_dict(exec_ctx)
+
         try:
             exec_result = await ctx.tools.call(
                 "python.execute",
                 allowed=allowed,
                 code=code,
-                task_id=task.task_id,
+                task_id=binding["task_id"],
+                project_id=binding["project_id"],
+                investigation_id=binding["investigation_id"],
+                contract_version=binding["contract_version"],
             )
         except SandboxSyntaxError as exc:
             # Invalid Python is a failed calculation, not a lab crash.
@@ -166,7 +227,15 @@ class SimulationAgent(BaseAgent):
             raise RuntimeError("python.execute must return a ComputationArtifact")
         artifact = ComputationArtifact.model_validate(exec_result["artifact"])
         artifact.kind = "calculation" if is_calculation else "simulation"
-        artifact.task_id = task.task_id
+        # Verify sandbox stamped the same ExecutionContext (no soft remapping).
+        require_artifact_context(exec_ctx, artifact, where="ComputationArtifact.post_execute")
+        artifact.task_id = binding["task_id"]
+        artifact.run_id = binding["run_id"]
+        artifact.project_id = binding["project_id"]
+        artifact.investigation_id = binding["investigation_id"]
+        artifact.contract_version = binding["contract_version"]
+        if artifact.created_at is None:
+            artifact.created_at = artifact.started_at
         artifact.objective = task.objective
         declared = payload.get("declared_outputs") if isinstance(payload.get("declared_outputs"), dict) else {}
         artifact.declared_outputs = declared
@@ -187,6 +256,12 @@ class SimulationAgent(BaseAgent):
         # Persist calculation spec under run planner namespace when available.
         paths: list[str] = []
         if calc_spec is not None and ctx.run_store is not None:
+            from ai_lab.core.execution_context import require_write_execution_context
+
+            # CalculationSpec JSON on disk must carry full identity (PR-C).
+            require_write_execution_context(
+                calc_spec, where="CalculationSpec.planner_write"
+            )
             rel = ctx.run_store.save_planner_json(
                 f"calculation_specs/{calc_spec.spec_id}.json",
                 calc_spec.model_dump(mode="json"),
@@ -278,6 +353,11 @@ class SimulationAgent(BaseAgent):
                     compute_check=0.8 if kind == EvidenceKind.CALCULATION else 0.1,
                     assumption_quality=0.4,
                 ),
+                project_id=binding["project_id"],
+                investigation_id=binding["investigation_id"],
+                task_id=binding["task_id"],
+                run_id=binding["run_id"],
+                contract_version=binding["contract_version"],
             )
             paths.append(ctx.evidence.save_claim(claim, subdirectory="calculations"))
             claims.append(claim)
@@ -333,6 +413,23 @@ class SimulationAgent(BaseAgent):
         exc: SandboxSyntaxError,
     ) -> AgentResult:
         """Record a parse failure as OPINION so the run can continue without invented numbers."""
+        from ai_lab.core.execution_context import (
+            ExecutionContext,
+            context_binding_dict,
+        )
+
+        exec_ctx = ctx.execution_context
+        if exec_ctx is None:
+            exec_ctx = ExecutionContext.for_project_run(
+                project_id=ctx.store.name,
+                investigation_id=ctx.store.name,
+                task_id=task.task_id,
+                run_id=ctx.run_id,
+            )
+        elif not isinstance(exec_ctx, ExecutionContext):
+            exec_ctx = ExecutionContext.model_validate(exec_ctx)
+        binding = context_binding_dict(exec_ctx)
+
         spec_dump = calc_spec.model_dump(mode="json") if calc_spec is not None else None
         spec_id = spec_dump.get("spec_id") if isinstance(spec_dump, dict) else None
         claim = Claim(
@@ -344,6 +441,11 @@ class SimulationAgent(BaseAgent):
             conditions={"sandbox_syntax_error": True, "calculation_spec_id": spec_id},
             agent_id=self.role.value,
             confidence=ConfidenceBreakdown(compute_check=0.0, assumption_quality=0.1),
+            project_id=binding["project_id"],
+            investigation_id=binding["investigation_id"],
+            task_id=binding["task_id"],
+            run_id=binding["run_id"],
+            contract_version=binding["contract_version"],
         )
         paths: list[str] = [ctx.evidence.save_claim(claim, subdirectory="calculations")]
         if calc_spec is not None and ctx.run_store is not None and spec_id:
