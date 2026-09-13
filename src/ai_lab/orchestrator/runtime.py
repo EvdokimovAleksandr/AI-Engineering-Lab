@@ -324,6 +324,8 @@ class LabRuntime:
                 "calculation_specs": list(getattr(self, "_calculation_specs", None) or []),
                 "relevance_results": list(getattr(self, "_relevance_results", None) or []),
                 "investigation_scope": self._investigation_scope,
+                # PR-B: SimulationAgent читает контракт для MethodCompatibilityGate.
+                "engineering_contract": self._engineering_contract,
                 "research_sufficiency": self._last_research_sufficiency,
             },
         )
@@ -1813,8 +1815,8 @@ class LabRuntime:
             import json as _json
 
             for path in sorted(spec_dir.glob("*.json")):
-                # Skip soft-failed invalid_* proposals — they must not count as contracts.
-                if path.name.startswith("invalid_"):
+                # Soft-failed invalid_* / incompatible_* — не считать валидным контрактом.
+                if path.name.startswith("invalid_") or path.name.startswith("incompatible_"):
                     continue
                 try:
                     loaded = CalculationSpec.model_validate(_json.loads(path.read_text(encoding="utf-8")))
@@ -1951,7 +1953,63 @@ class LabRuntime:
                 run_id=self.run_id,
                 contract_version=active_contract_version(self._engineering_contract),
             ),
+            # PR-B: method/domain gate — fiber calc cannot PASS shaft/rod.
+            engineering_contract=self._engineering_contract,
+            investigation_scope=self._investigation_scope,
+            original_problem=self._original_problem_text(),
+            problem_objective=(
+                self._engineering_contract.objective.statement
+                if self._engineering_contract is not None
+                else (
+                    self._investigation_scope.objective
+                    if self._investigation_scope is not None
+                    else None
+                )
+            ),
+            declared_domain=(
+                (
+                    self._engineering_contract.scope.domain
+                    if self._engineering_contract is not None
+                    else None
+                )
+                or (
+                    self._investigation_scope.domain
+                    if self._investigation_scope is not None
+                    else None
+                )
+            ),
         )
+        # PR-B: soft-dropped incompatible_* specs всё равно блокируют PASS (audit trail).
+        if spec_dir.is_dir():
+            import json as _json
+
+            incompat_reasons: list[str] = []
+            for path in sorted(spec_dir.glob("incompatible_*.json")):
+                try:
+                    payload = _json.loads(path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    logger.error("Failed reading incompatible spec %s: %s", path, exc)
+                    incompat_reasons.append(f"unreadable incompatible spec {path.name}")
+                    continue
+                compat = payload.get("compatibility") if isinstance(payload, dict) else None
+                if isinstance(compat, dict):
+                    incompat_reasons.extend(str(r) for r in (compat.get("reasons") or []))
+                elif isinstance(payload, dict) and payload.get("error"):
+                    incompat_reasons.append(str(payload["error"]))
+            if incompat_reasons:
+                reasons = list(completeness.reasons) + list(dict.fromkeys(incompat_reasons))
+                completeness = completeness.model_copy(
+                    update={
+                        "method_compatible": False,
+                        "computation_relevant": False,
+                        "reasons": reasons,
+                    }
+                )
+                logger.error(
+                    "MethodCompatibilityGate: incompatible CalculationSpec on disk blocks PASS (%s)",
+                    [p.name for p in spec_dir.glob("incompatible_*.json")],
+                )
+
         self._last_evidence_completeness = completeness
         self.run_store.save_review_json(
             "evidence_completeness.json", completeness.model_dump(mode="json")

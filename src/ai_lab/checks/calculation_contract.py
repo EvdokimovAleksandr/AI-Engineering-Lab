@@ -612,6 +612,12 @@ def evaluate_evidence_completeness(
     required_contract_outputs: list[str] | None = None,
     evidence_records: list | None = None,
     execution_context: Any | None = None,
+    # PR-B: semantic method/domain frame (EngineeringContract / InvestigationScope).
+    engineering_contract: Any | None = None,
+    investigation_scope: Any | None = None,
+    problem_objective: str | None = None,
+    original_problem: str | None = None,
+    declared_domain: str | None = None,
 ) -> EvidenceCompletenessReport:
     """Gate before adjudication: missing mandatory evidence ⇒ not PASS."""
     policy = verification_policy or VerificationPolicy()
@@ -628,6 +634,7 @@ def evaluate_evidence_completeness(
     acceptance_ok = True if acceptance_passed is None else bool(acceptance_passed)
     lineage_ok = True
     contract_coverage_ok = True
+    method_compatible = True
     coverage_ratio: float | None = None
 
     if require_calculation or policy.calculation_required:
@@ -790,6 +797,31 @@ def evaluate_evidence_completeness(
     if not lineage_ok or not contract_coverage_ok:
         reasons.extend(lineage_report.reasons)
 
+    # PR-B: Method/Domain Compatibility Gate — до adjudication PASS.
+    from ai_lab.checks.method_compatibility import (
+        evaluate_specs_method_compatibility,
+        problem_frame_from_sources,
+    )
+
+    method_frame = problem_frame_from_sources(
+        engineering_contract=engineering_contract,
+        investigation_scope=investigation_scope,
+        original_problem=original_problem,
+        objective=problem_objective,
+        declared_domain=declared_domain,
+        required_outputs=list(required_contract_outputs or policy.required_outputs or []),
+    )
+    if calculation_specs and (require_calculation or policy.calculation_required):
+        method_report = evaluate_specs_method_compatibility(calculation_specs, method_frame)
+        if not method_report.compatible:
+            method_compatible = False
+            computation_relevant = False
+            reasons.extend(method_report.reasons)
+            logger.error(
+                "Evidence completeness blocked by MethodCompatibilityGate: %s",
+                method_report.codes,
+            )
+
     # PR-06: списки covered/missing для IterationController (не только ratio).
     covered_outputs = list(lineage_report.covered_outputs)
     missing_outputs = list(lineage_report.missing_outputs)
@@ -808,6 +840,7 @@ def evaluate_evidence_completeness(
         acceptance_passed=acceptance_ok,
         lineage_ok=lineage_ok,
         contract_coverage_ok=contract_coverage_ok,
+        method_compatible=method_compatible,
         coverage_ratio=coverage_ratio,
         covered_outputs=covered_outputs,
         missing_outputs=missing_outputs,

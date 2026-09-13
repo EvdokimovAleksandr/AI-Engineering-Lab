@@ -162,6 +162,33 @@ class SimulationAgent(BaseAgent):
                         )
                     calc_spec = None
 
+            # PR-B: MethodCompatibilityGate до sandbox — чужой метод не исполняем как валидный контракт.
+            if calc_spec is not None:
+                from ai_lab.checks.method_compatibility import (
+                    check_method_compatibility,
+                    problem_frame_from_agent_context,
+                )
+
+                frame = problem_frame_from_agent_context(ctx)
+                compat = check_method_compatibility(calc_spec, frame)
+                if not compat.compatible:
+                    contract_error = (
+                        f"MethodCompatibilityGate: {compat.codes}: {compat.reasons}"
+                    )
+                    logger.error("%s", contract_error)
+                    if ctx.run_store is not None:
+                        ctx.run_store.save_planner_json(
+                            f"calculation_specs/incompatible_{calc_spec.spec_id}.json",
+                            {
+                                "error": contract_error,
+                                "compatibility": compat.model_dump(mode="json"),
+                                "proposal": calc_spec.model_dump(mode="json"),
+                                "problem_frame": frame.model_dump(mode="json"),
+                            },
+                        )
+                    # Контракт снят — execution без binding не даёт PASS (completeness).
+                    calc_spec = None
+
         # Hard gate before sandbox: spec must belong to this task/run/investigation.
         if calc_spec is not None:
             require_artifact_context(exec_ctx, calc_spec, where="CalculationSpec.pre_execute")

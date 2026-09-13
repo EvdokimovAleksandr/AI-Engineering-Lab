@@ -708,6 +708,8 @@ class EvidenceCompletenessReport(BaseModel):
     # PR-05: lineage + contract coverage (fail → INSUFFICIENT_EVIDENCE, not silent PASS).
     lineage_ok: bool = True
     contract_coverage_ok: bool = True
+    # PR-B: method/domain semantic contract (fiber calc ≠ shaft PASS).
+    method_compatible: bool = True
     # PR-06 IterationController: covered / required outputs + ratio.
     coverage_ratio: float | None = None
     covered_outputs: list[str] = Field(default_factory=list)
@@ -729,6 +731,7 @@ class EvidenceCompletenessReport(BaseModel):
             and self.acceptance_passed
             and self.lineage_ok
             and self.contract_coverage_ok
+            and self.method_compatible
         )
 
 
