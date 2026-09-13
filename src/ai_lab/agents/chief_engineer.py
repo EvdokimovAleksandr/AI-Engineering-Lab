@@ -118,6 +118,25 @@ class ChiefEngineerAgent(BaseAgent):
             confidence=ConfidenceBreakdown(assumption_quality=0.4, source_quality=0.3),
             falsifiers=["Problem restatement rejected by human owner"],
         )
+        # PR-C: stamp full ExecutionContext before EvidenceStore persist.
+        from ai_lab.core.execution_context import ExecutionContext, context_binding_dict
+
+        exec_ctx = ctx.execution_context
+        if exec_ctx is None:
+            exec_ctx = ExecutionContext.for_project_run(
+                project_id=ctx.store.name,
+                investigation_id=ctx.store.name,
+                task_id=task.task_id,
+                run_id=ctx.run_id,
+            )
+        elif not isinstance(exec_ctx, ExecutionContext):
+            exec_ctx = ExecutionContext.model_validate(exec_ctx)
+        binding = context_binding_dict(exec_ctx)
+        claim.project_id = binding["project_id"]
+        claim.investigation_id = binding["investigation_id"]
+        claim.task_id = binding["task_id"]
+        claim.run_id = binding["run_id"]
+        claim.contract_version = binding["contract_version"]
         claim_path = ctx.evidence.save_claim(claim, subdirectory="reviews")
 
         # Canonical DecisionLog owner is LabRuntime — return decision, do not append here

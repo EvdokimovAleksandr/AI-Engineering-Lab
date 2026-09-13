@@ -403,6 +403,8 @@ async def test_runtime_claim_verification_result_provenance(tmp_path: Path) -> N
             "expected": {"value": 0.1, "unit": "GPa"},
             "tolerance": {"absolute": {"value": 1e-9, "unit": "GPa"}},
         },
+        investigation_id="prov",
+        task_id="task_test",
     )
     evidence.save_claim(claim, subdirectory="calculations")
     config = LabConfig.model_validate(
@@ -447,6 +449,8 @@ async def test_verification_agent_cannot_override_fail(tmp_path: Path) -> None:
             run_id="run_ov",
             project_id="ov",
             math_check={"expression": "2 * 5", "expected": 11, "tolerance": 0, "inputs": {}},
+            investigation_id="ov",
+            task_id="task_test",
         ),
         subdirectory="calculations",
     )

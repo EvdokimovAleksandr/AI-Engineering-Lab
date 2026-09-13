@@ -30,6 +30,20 @@ class TheoristAgent(BaseAgent):
 
         claims: list[Claim] = []
         paths: list[str] = []
+        from ai_lab.core.execution_context import ExecutionContext, context_binding_dict
+
+        exec_ctx = ctx.execution_context
+        if exec_ctx is None:
+            exec_ctx = ExecutionContext.for_project_run(
+                project_id=ctx.store.name,
+                investigation_id=ctx.store.name,
+                task_id=task.task_id,
+                run_id=ctx.run_id,
+            )
+        elif not isinstance(exec_ctx, ExecutionContext):
+            exec_ctx = ExecutionContext.model_validate(exec_ctx)
+        binding = context_binding_dict(exec_ctx)
+
         for item in payload.get("claims") or []:
             claim = Claim(
                 statement=str(item.get("statement") or ""),
@@ -41,6 +55,11 @@ class TheoristAgent(BaseAgent):
                 falsifiers=coerce_str_list(item.get("falsifiers")),
                 agent_id=self.role.value,
                 confidence=ConfidenceBreakdown(assumption_quality=0.5, source_quality=0.3),
+                project_id=binding["project_id"],
+                investigation_id=binding["investigation_id"],
+                task_id=binding["task_id"],
+                run_id=binding["run_id"],
+                contract_version=binding["contract_version"],
             )
             paths.append(ctx.evidence.save_claim(claim, subdirectory="calculations"))
             claims.append(claim)

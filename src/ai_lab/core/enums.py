@@ -531,6 +531,8 @@ class LabErrorCode(str, Enum):
     """
 
     CONTEXT_MISMATCH = "CONTEXT_MISMATCH"
+    # New persisted writes must carry full project/investigation/task/run identity.
+    MISSING_EXECUTION_CONTEXT = "MISSING_EXECUTION_CONTEXT"
     # Pipeline stages that need a contract must not run on DRAFT / NEEDS_CLARIFICATION.
     CONTRACT_NOT_READY = "CONTRACT_NOT_READY"
     # LOCKED contract cannot be mutated in place; use a version bump.

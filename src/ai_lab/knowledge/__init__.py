@@ -60,9 +60,6 @@ class KnowledgeService:
             return self.claims.list_claims(visibility=vis, include_superseded=True)
         return self.claims.list_claims(visibility=vis)
 
-    def save_claim(self, claim: Claim) -> Claim:
-        if not claim.run_id:
-            claim.run_id = self.run_id
-        if not claim.project_id:
-            claim.project_id = self.store.name
-        return self.claims.save_claim(claim)
+    def save_claim(self, claim: Claim, *, legacy_migrate: bool = False) -> Claim:
+        # PR-C: no auto-fill — caller must stamp full ExecutionContext before save.
+        return self.claims.save_claim(claim, legacy_migrate=legacy_migrate)

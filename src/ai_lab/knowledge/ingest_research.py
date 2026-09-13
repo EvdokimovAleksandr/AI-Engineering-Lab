@@ -63,10 +63,28 @@ def ingest_research_result(
     run_id: str,
     created_by: str = "research",
     create_claims: bool = True,
+    project_id: str | None = None,
+    investigation_id: str | None = None,
+    task_id: str | None = None,
+    contract_version: str | None = None,
 ) -> dict[str, Any]:
     """Write sources, evidence, claims, and provenance edges into the existing graph."""
     if not run_id:
         raise ValueError("ingest_research_result requires run_id")
+    # PR-C: explicit kwargs win; claims must carry full ExecutionContext before save.
+    bind_project = project_id or result.project_id
+    bind_investigation = investigation_id or result.investigation_id or bind_project
+    bind_task = task_id or result.task_id
+    bind_contract = contract_version or result.contract_version
+    from ai_lab.core.execution_context import require_full_execution_identity
+
+    require_full_execution_identity(
+        project_id=bind_project,
+        investigation_id=bind_investigation,
+        task_id=bind_task,
+        run_id=run_id,
+        where="ingest_research_result",
+    )
     graph = knowledge.graph
     evidence_by_source: dict[str, list[EvidenceRecord]] = {}
     for ev in result.evidence:
@@ -154,10 +172,10 @@ def ingest_research_result(
                     else (0.7 if source.trust_tier == SourceTrustTier.PRIMARY else 0.45)
                 ),
                 run_id=run_id,
-                project_id=result.project_id,
-                investigation_id=result.investigation_id or result.project_id,
-                task_id=result.task_id,
-                contract_version=result.contract_version,
+                project_id=bind_project,
+                investigation_id=bind_investigation,
+                task_id=bind_task,
+                contract_version=bind_contract,
             )
             saved = knowledge.save_claim(claim)
             claim_ids.append(saved.claim_id)

@@ -44,10 +44,28 @@ class ResearchAgent(BaseAgent):
         query0 = initial_query(scope, task.objective)
 
         async def _call(query: str, **_kw: object) -> ResearchResult:
+            # PR-C: research.query ingest writes claims — pass full ExecutionContext.
+            from ai_lab.core.execution_context import ExecutionContext, context_binding_dict
+
+            exec_ctx = ctx.execution_context
+            if exec_ctx is None:
+                exec_ctx = ExecutionContext.for_project_run(
+                    project_id=ctx.store.name,
+                    investigation_id=ctx.store.name,
+                    task_id=task.task_id,
+                    run_id=ctx.run_id,
+                )
+            elif not isinstance(exec_ctx, ExecutionContext):
+                exec_ctx = ExecutionContext.model_validate(exec_ctx)
+            binding = context_binding_dict(exec_ctx)
             payload = await ctx.tools.call(
                 "research.query",
                 allowed=allowed,
                 query=query,
+                project_id=binding["project_id"],
+                investigation_id=binding["investigation_id"],
+                task_id=binding["task_id"],
+                contract_version=binding["contract_version"],
             )
             return _result_from_tool(payload)
 
@@ -170,7 +188,7 @@ class ResearchAgent(BaseAgent):
                 ),
                 schema_name="ResearchFindings",
             )
-            findings, claim_paths = _findings_from_payload(payload, tool_dump, ctx)
+            findings, claim_paths = _findings_from_payload(payload, tool_dump, ctx, binding=binding)
             paths.extend(claim_paths)
 
         await ctx.tools.call(
@@ -257,7 +275,7 @@ def _result_from_tool(payload: dict) -> ResearchResult:
 
 
 def _findings_from_payload(
-    payload: dict, tool_result: dict, ctx: AgentContext
+    payload: dict, tool_result: dict, ctx: AgentContext, *, binding: dict | None = None
 ) -> tuple[list[ResearchFinding], list[str]]:
     findings: list[ResearchFinding] = []
     paths: list[str] = []
@@ -291,6 +309,23 @@ def _findings_from_payload(
         except (TypeError, ValueError):
             logger.error("Research findings[%s].relevance is %s; using 0.5", i, type(raw_relevance).__name__)
             relevance = 0.5
+        # PR-C: stamp full ExecutionContext — EvidenceStore no longer auto-fills.
+        claim_kwargs: dict = {}
+        if binding:
+            claim_kwargs = {
+                "project_id": binding["project_id"],
+                "investigation_id": binding["investigation_id"],
+                "task_id": binding["task_id"],
+                "run_id": binding["run_id"],
+                "contract_version": binding.get("contract_version"),
+            }
+        else:
+            claim_kwargs = {
+                "project_id": ctx.store.name,
+                "investigation_id": ctx.store.name,
+                "task_id": ctx.extra.get("task_id"),
+                "run_id": ctx.run_id,
+            }
         claim = Claim(
             statement=str(item.get("statement") or ""),
             kind=kind,
@@ -306,10 +341,7 @@ def _findings_from_payload(
                 source_quality=0.2 if source_trust == SourceTrustTier.STUB else (0.5 if source else 0.2),
                 assumption_quality=0.4,
             ),
-            project_id=ctx.store.name,
-            investigation_id=ctx.store.name,
-            task_id=ctx.extra.get("task_id"),
-            run_id=ctx.run_id,
+            **claim_kwargs,
         )
         rel = ctx.evidence.save_claim(claim, subdirectory="research")
         paths.append(rel)

@@ -192,8 +192,21 @@ class RunStore:
         self.save_manifest(manifest)
         return manifest
 
-    def save_computation(self, artifact: ComputationArtifact) -> str:
-        """Immutable write — refuses overwrite of existing artifact_id."""
+    def save_computation(
+        self,
+        artifact: ComputationArtifact,
+        *,
+        legacy_migrate: bool = False,
+    ) -> str:
+        """Immutable write — refuses overwrite; new writes need full ExecutionContext."""
+        from ai_lab.core.execution_context import require_write_execution_context
+
+        # PR-C: disk persist is the trust boundary — incomplete identity is forbidden.
+        require_write_execution_context(
+            artifact,
+            where="RunStore.save_computation",
+            legacy_migrate=legacy_migrate,
+        )
         rel = self.rel("computations", f"{artifact.artifact_id}.json")
         full = self.project.root / rel
         if full.exists():

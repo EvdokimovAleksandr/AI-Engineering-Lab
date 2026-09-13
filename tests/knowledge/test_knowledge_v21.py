@@ -55,12 +55,16 @@ def test_claim_namespace_isolation(tmp_path: Path) -> None:
         kind=EvidenceKind.ASSUMPTION,
         project_id=store.name,
         run_id="run_a",
+        investigation_id=store.name,
+        task_id="task_test",
     )
     c2 = Claim(
         statement="run2",
         kind=EvidenceKind.ASSUMPTION,
         project_id=store.name,
         run_id="run_b",
+        investigation_id=store.name,
+        task_id="task_test",
     )
     repo.save_claim(c1)
     repo.save_claim(c2)
@@ -81,6 +85,8 @@ def test_old_run_claims_invisible_by_default(tmp_path: Path) -> None:
             evidence="e",
             project_id=store.name,
             run_id="run_old",
+            investigation_id=store.name,
+            task_id="task_test",
         )
     )
     visible = ks.list_for_agent(AgentRole.VERIFICATION)
@@ -98,6 +104,8 @@ def test_approved_knowledge_visibility(tmp_path: Path) -> None:
         run_id="run_ok",
         content_hash="abc",
         agreement_type=AgreementType.INDEPENDENT_EVIDENCE,
+        investigation_id=store.name,
+        task_id="task_test",
     )
     JsonKnowledgeRepository(store).save_claim(claim)
     promote_to_approved_knowledge(
@@ -123,9 +131,9 @@ def test_approved_knowledge_visibility(tmp_path: Path) -> None:
 def test_supersede_chain(tmp_path: Path) -> None:
     store = _proj(tmp_path)
     repo = JsonKnowledgeRepository(store)
-    c1 = Claim(statement="v1", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="r1")
+    c1 = Claim(statement="v1", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="r1", investigation_id=store.name, task_id="task_test")
     repo.save_claim(c1)
-    c2 = Claim(statement="v2", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="r1")
+    c2 = Claim(statement="v2", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="r1", investigation_id=store.name, task_id="task_test")
     repo.supersede_claim(c1.claim_id, c2)
     old = repo.get_claim(c1.claim_id)
     assert old.lifecycle == ClaimLifecycle.SUPERSEDED
@@ -210,6 +218,8 @@ def test_conflict_creation_and_resolution(tmp_path: Path) -> None:
                 kind=EvidenceKind.ASSUMPTION,
                 project_id=store.name,
                 run_id="r1",
+                investigation_id=store.name,
+                task_id="task_test",
             )
         )
     conf = create_conflict(store, g, claim_a="cA", claim_b="cB", run_id="r1")
@@ -232,6 +242,8 @@ def test_promotion_rejection_when_verification_fails(tmp_path: Path) -> None:
         project_id=store.name,
         run_id="r1",
         content_hash="h",
+        investigation_id=store.name,
+        task_id="task_test",
     )
     with pytest.raises(PermissionError, match="Promotion denied"):
         promote_to_approved_knowledge(
@@ -254,6 +266,8 @@ def test_promotion_success_when_gates_pass(tmp_path: Path) -> None:
         project_id=store.name,
         run_id="r1",
         content_hash="h",
+        investigation_id=store.name,
+        task_id="task_test",
     )
     entry = promote_to_approved_knowledge(
         store,
@@ -276,6 +290,8 @@ def test_promotion_rejects_consensus_only(tmp_path: Path) -> None:
         project_id=store.name,
         run_id="r1",
         content_hash="h",
+        investigation_id=store.name,
+        task_id="task_test",
     )
     with pytest.raises(PermissionError, match="CONSENSUS"):
         promote_to_approved_knowledge(
@@ -299,6 +315,8 @@ def test_knowledge_demotion(tmp_path: Path) -> None:
         run_id="r1",
         content_hash="h",
         claim_id="claim_demote",
+        investigation_id=store.name,
+        task_id="task_test",
     )
     promote_to_approved_knowledge(
         store,
@@ -321,10 +339,10 @@ def test_compare_runs(tmp_path: Path) -> None:
     repo = JsonKnowledgeRepository(store)
     g = JsonEvidenceRepository(store)
     repo.save_claim(
-        Claim(statement="a", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="run1")
+        Claim(statement="a", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="run1", investigation_id=store.name, task_id="task_test")
     )
     repo.save_claim(
-        Claim(statement="b", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="run2")
+        Claim(statement="b", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="run2", investigation_id=store.name, task_id="task_test")
     )
     g.ensure_node(node_type=GraphNodeType.CLAIM, ref_id="x", run_id="run2", label="x")
     cmp = compare_runs(store, repo, g, "run1", "run2")
@@ -358,6 +376,8 @@ def test_evidence_path_query(tmp_path: Path) -> None:
         kind=EvidenceKind.ASSUMPTION,
         project_id=store.name,
         run_id="r1",
+        investigation_id=store.name,
+        task_id="task_test",
     )
     repo.save_claim(claim)
     cn = g.ensure_node(node_type=GraphNodeType.CLAIM, ref_id="clm_path", run_id="r1")
@@ -409,6 +429,8 @@ def test_no_accidental_stale_claim_leakage(tmp_path: Path) -> None:
             kind=EvidenceKind.ASSUMPTION,
             project_id=store.name,
             run_id="run_old",
+            investigation_id=store.name,
+            task_id="task_test",
         )
     )
     ev = __import__("ai_lab.memory.evidence_store", fromlist=["EvidenceStore"]).EvidenceStore(
@@ -464,7 +486,7 @@ def test_project_timeline(tmp_path: Path) -> None:
     store = _proj(tmp_path)
     repo = JsonKnowledgeRepository(store)
     repo.save_claim(
-        Claim(statement="t", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="run_tl")
+        Claim(statement="t", kind=EvidenceKind.ASSUMPTION, project_id=store.name, run_id="run_tl", investigation_id=store.name, task_id="task_test")
     )
     events = get_project_timeline(store, repo)
     assert any(e.run_id == "run_tl" for e in events)

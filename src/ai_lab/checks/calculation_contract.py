@@ -207,6 +207,7 @@ def parse_calculation_spec(
     contract_version: str | None = None,
     policy: VerificationPolicy | None = None,
     execution_context: Any | None = None,
+    legacy_migrate: bool = False,
 ) -> CalculationSpec | None:
     """Parse LLM/proposal dict into CalculationSpec; policy locks trusted fields.
 
@@ -215,6 +216,9 @@ def parse_calculation_spec(
 
     When execution_context (or explicit ids) is provided, a proposal that carries
     a *different* task/run/project identity raises CONTEXT_MISMATCH — no remapping.
+
+    New writes require full identity (PR-C). Soft legacy fill only when
+    ``legacy_migrate=True``.
     """
     if not raw or not isinstance(raw, dict):
         return None
@@ -224,7 +228,9 @@ def parse_calculation_spec(
     from ai_lab.core.execution_context import (
         UNSET_CONTRACT_VERSION,
         ExecutionContext,
+        MissingExecutionContextError,
         require_context_match,
+        require_full_execution_identity,
         stamp_context_fields,
     )
 
@@ -265,8 +271,8 @@ def parse_calculation_spec(
             where="CalculationSpec.proposal",
         )
         data.update(stamped)
-    else:
-        # Legacy callers without ExecutionContext: only fill unset ids (no overwrite).
+    elif legacy_migrate:
+        # Explicit migration path only — fill unset slots from caller kwargs.
         if task_id and not data.get("task_id"):
             data["task_id"] = task_id
         if run_id and not data.get("run_id"):
@@ -277,6 +283,28 @@ def parse_calculation_spec(
             data["investigation_id"] = investigation_id
         if contract_version and not data.get("contract_version"):
             data["contract_version"] = contract_version
+    else:
+        # Merge explicit kwargs then require full identity — no soft legacy-safe omit.
+        if task_id and not data.get("task_id"):
+            data["task_id"] = task_id
+        if run_id and not data.get("run_id"):
+            data["run_id"] = run_id
+        if project_id and not data.get("project_id"):
+            data["project_id"] = project_id
+        if investigation_id and not data.get("investigation_id"):
+            data["investigation_id"] = investigation_id
+        if contract_version and not data.get("contract_version"):
+            data["contract_version"] = contract_version
+        try:
+            require_full_execution_identity(
+                project_id=data.get("project_id"),
+                investigation_id=data.get("investigation_id"),
+                task_id=data.get("task_id"),
+                run_id=data.get("run_id"),
+                where="CalculationSpec.proposal",
+            )
+        except MissingExecutionContextError:
+            raise
         # Refuse wrong identity even without a full ExecutionContext object.
         from ai_lab.core.execution_context import ContextMismatchError
 

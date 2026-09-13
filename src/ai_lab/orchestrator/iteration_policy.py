@@ -115,6 +115,8 @@ def classify_failure(
     code_u = str(code).upper()
     if code_u == LabErrorCode.CONTEXT_MISMATCH.value:
         return FailureClass.CONTEXT
+    if code_u == LabErrorCode.MISSING_EXECUTION_CONTEXT.value:
+        return FailureClass.CONTEXT
     if code_u in {
         LabErrorCode.CONTRACT_NOT_READY.value,
         LabErrorCode.CONTRACT_LOCKED.value,

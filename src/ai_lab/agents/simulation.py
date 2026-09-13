@@ -193,12 +193,18 @@ class SimulationAgent(BaseAgent):
         if calc_spec is not None:
             require_artifact_context(exec_ctx, calc_spec, where="CalculationSpec.pre_execute")
 
+        # Stamp identity before execute so ComputationArtifact is complete on first disk write.
+        binding = context_binding_dict(exec_ctx)
+
         try:
             exec_result = await ctx.tools.call(
                 "python.execute",
                 allowed=allowed,
                 code=code,
-                task_id=task.task_id,
+                task_id=binding["task_id"],
+                project_id=binding["project_id"],
+                investigation_id=binding["investigation_id"],
+                contract_version=binding["contract_version"],
             )
         except SandboxSyntaxError as exc:
             # Invalid Python is a failed calculation, not a lab crash.
@@ -221,8 +227,8 @@ class SimulationAgent(BaseAgent):
             raise RuntimeError("python.execute must return a ComputationArtifact")
         artifact = ComputationArtifact.model_validate(exec_result["artifact"])
         artifact.kind = "calculation" if is_calculation else "simulation"
-        # Stamp PR-01 lineage / isolation fields (fill unset only; mismatch already gated).
-        binding = context_binding_dict(exec_ctx)
+        # Verify sandbox stamped the same ExecutionContext (no soft remapping).
+        require_artifact_context(exec_ctx, artifact, where="ComputationArtifact.post_execute")
         artifact.task_id = binding["task_id"]
         artifact.run_id = binding["run_id"]
         artifact.project_id = binding["project_id"]
@@ -250,6 +256,12 @@ class SimulationAgent(BaseAgent):
         # Persist calculation spec under run planner namespace when available.
         paths: list[str] = []
         if calc_spec is not None and ctx.run_store is not None:
+            from ai_lab.core.execution_context import require_write_execution_context
+
+            # CalculationSpec JSON on disk must carry full identity (PR-C).
+            require_write_execution_context(
+                calc_spec, where="CalculationSpec.planner_write"
+            )
             rel = ctx.run_store.save_planner_json(
                 f"calculation_specs/{calc_spec.spec_id}.json",
                 calc_spec.model_dump(mode="json"),
@@ -401,6 +413,23 @@ class SimulationAgent(BaseAgent):
         exc: SandboxSyntaxError,
     ) -> AgentResult:
         """Record a parse failure as OPINION so the run can continue without invented numbers."""
+        from ai_lab.core.execution_context import (
+            ExecutionContext,
+            context_binding_dict,
+        )
+
+        exec_ctx = ctx.execution_context
+        if exec_ctx is None:
+            exec_ctx = ExecutionContext.for_project_run(
+                project_id=ctx.store.name,
+                investigation_id=ctx.store.name,
+                task_id=task.task_id,
+                run_id=ctx.run_id,
+            )
+        elif not isinstance(exec_ctx, ExecutionContext):
+            exec_ctx = ExecutionContext.model_validate(exec_ctx)
+        binding = context_binding_dict(exec_ctx)
+
         spec_dump = calc_spec.model_dump(mode="json") if calc_spec is not None else None
         spec_id = spec_dump.get("spec_id") if isinstance(spec_dump, dict) else None
         claim = Claim(
@@ -412,6 +441,11 @@ class SimulationAgent(BaseAgent):
             conditions={"sandbox_syntax_error": True, "calculation_spec_id": spec_id},
             agent_id=self.role.value,
             confidence=ConfidenceBreakdown(compute_check=0.0, assumption_quality=0.1),
+            project_id=binding["project_id"],
+            investigation_id=binding["investigation_id"],
+            task_id=binding["task_id"],
+            run_id=binding["run_id"],
+            contract_version=binding["contract_version"],
         )
         paths: list[str] = [ctx.evidence.save_claim(claim, subdirectory="calculations")]
         if calc_spec is not None and ctx.run_store is not None and spec_id:

@@ -15,6 +15,10 @@ class SolverContext:
 
     run_id: str
     task_id: str | None = None
+    # PR-C: full ExecutionContext for ComputationArtifact / claim writes.
+    project_id: str | None = None
+    investigation_id: str | None = None
+    contract_version: str | None = None
     repo_root: Path | None = None
     extra: dict[str, Any] | None = None
 

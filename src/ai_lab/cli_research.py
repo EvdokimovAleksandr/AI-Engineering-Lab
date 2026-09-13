@@ -58,7 +58,16 @@ async def run_research_cli(
         store.ensure_layout()
         run_id = f"run_{uuid4().hex[:12]}"
         knowledge = KnowledgeService(store, run_id=run_id)
-        ingest = ingest_research_result(knowledge, result, run_id=run_id, created_by="research")
+        # CLI research ingest: project folder is the investigation; task is explicit CLI slice.
+        ingest = ingest_research_result(
+            knowledge,
+            result,
+            run_id=run_id,
+            created_by="research",
+            project_id=store.name,
+            investigation_id=store.name,
+            task_id="research",
+        )
 
     payload = _public_result(result)
     payload["findings"] = [f.model_dump(mode="json") for f in result.findings]

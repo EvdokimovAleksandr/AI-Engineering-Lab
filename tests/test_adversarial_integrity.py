@@ -367,6 +367,9 @@ def test_calculation_spec_cannot_remove_required_output() -> None:
             "minimum_checks": 0,
         },
         task_id="calculation",
+        run_id="run_policy_lock",
+        project_id="proj_policy",
+        investigation_id="proj_policy",
         policy=policy,
     )
     assert spec is not None

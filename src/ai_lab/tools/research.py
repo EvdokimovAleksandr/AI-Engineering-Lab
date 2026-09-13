@@ -72,9 +72,18 @@ class ResearchTool:
     def as_spec(self) -> ToolSpec:
         return ToolSpec(name=self.name, description=self.description, handler=self.run)
 
-    async def run(self, query: str = "", **_: Any) -> dict[str, Any]:
+    async def run(self, query: str = "", **kwargs: Any) -> dict[str, Any]:
         if not query or not str(query).strip():
             raise ValueError("research.query requires non-empty 'query'")
+
+        # PR-C: optional ExecutionContext fields for claim ingest (required when knowledge set).
+        project_id = kwargs.pop("project_id", None)
+        investigation_id = kwargs.pop("investigation_id", None)
+        task_id = kwargs.pop("task_id", None)
+        contract_version = kwargs.pop("contract_version", None)
+        if kwargs:
+            logger.error("research.query received unexpected kwargs: %s", sorted(kwargs))
+            raise TypeError(f"research.query unexpected kwargs: {sorted(kwargs)}")
 
         q = str(query).strip()
         try:
@@ -104,6 +113,23 @@ class ResearchTool:
             payload["provider_error"] = str(exc)
             return payload
 
+        # Stamp identity onto ResearchResult before claim ingest (no soft-fill in save_claim).
+        if project_id or investigation_id or task_id or contract_version:
+            updates = {}
+            if project_id:
+                updates["project_id"] = str(project_id)
+            if investigation_id:
+                updates["investigation_id"] = str(investigation_id)
+            elif project_id:
+                updates["investigation_id"] = str(project_id)
+            if task_id:
+                updates["task_id"] = str(task_id)
+            if contract_version:
+                updates["contract_version"] = str(contract_version)
+            if self.run_id and not result.run_id:
+                updates["run_id"] = self.run_id
+            result = result.model_copy(update=updates)
+
         ingest_report = None
         if self.knowledge is not None:
             if not self.run_id:
@@ -113,6 +139,10 @@ class ResearchTool:
                 result,
                 run_id=self.run_id,
                 created_by="research",
+                project_id=project_id or result.project_id,
+                investigation_id=investigation_id or result.investigation_id,
+                task_id=task_id or result.task_id,
+                contract_version=contract_version or result.contract_version,
             )
         payload = _public_result(result)
         payload["findings"] = [f.model_dump(mode="json") for f in result.findings]

@@ -1657,7 +1657,14 @@ class LabRuntime:
             self._last_simulation_spec = spec
         result = run_simulation(
             spec,
-            SolverContext(run_id=self.run_id, task_id=task.task_id, repo_root=self.repo_root),
+            SolverContext(
+                run_id=self.run_id,
+                task_id=task.task_id,
+                project_id=self._run_project_id,
+                investigation_id=self._run_investigation_id,
+                contract_version=active_contract_version(self._engineering_contract),
+                repo_root=self.repo_root,
+            ),
             run_store=self.run_store,
         )
         self._last_simulation_result = result
@@ -1665,7 +1672,16 @@ class LabRuntime:
         self.project.write_json(rel, result.model_dump(mode="json"))
         self.project.write_json("simulations/last_result.json", result.model_dump(mode="json"))
         vspecs = verification_specs_from_simulation(spec, result)
-        claims = claims_from_simulation(spec, result, verification_specs=vspecs)
+        claims = claims_from_simulation(
+            spec,
+            result,
+            verification_specs=vspecs,
+            project_id=self._run_project_id,
+            investigation_id=self._run_investigation_id,
+            task_id=task.task_id,
+            run_id=self.run_id,
+            contract_version=active_contract_version(self._engineering_contract),
+        )
         claim_ids: list[str] = []
         sim_node = self.graph.ensure_node(
             node_type=GraphNodeType.SIMULATION,
@@ -1742,10 +1758,12 @@ class LabRuntime:
         comps = [a.model_dump(mode="json") for a in self.run_store.list_computations()]
 
         async def _exec(code: str) -> dict:
+            # Ephemeral math-check recompute — must not persist incomplete ComputationArtifacts.
             return await self.tools.call(
                 "python.execute",
                 allowed=["python.execute"],
                 code=code,
+                persist_computation=False,
             )
 
         from ai_lab.memory.review_bundle import claim_to_blind_view

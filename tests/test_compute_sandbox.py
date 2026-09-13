@@ -455,7 +455,12 @@ async def test_artifact_saved_and_manifest_sandbox_fields(tmp_path: Path) -> Non
         run_id="run_prov",
         repo_root=REPO,
     )
-    out = await tool.run(code="print(42)", task_id="task_sim")
+    out = await tool.run(
+        code="print(42)",
+        task_id="task_sim",
+        project_id=store.name,
+        investigation_id=store.name,
+    )
     assert out["artifact_saved"] is True
     arts = rs.list_computations()
     assert len(arts) == 1
@@ -590,6 +595,8 @@ async def test_taskgraph_python_execute_goes_through_sandbox(tmp_path: Path) -> 
         allowed=["python.execute"],
         code="print(1)",
         task_id=sim_tasks[0].task_id,
+        project_id=store.name,
+        investigation_id=store.name,
     )
     assert out["sandbox_status"] == SandboxStatus.SUCCESS.value
     assert out["artifact_id"]
