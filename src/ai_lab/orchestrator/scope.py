@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from ai_lab.core.enums import AssumptionKind, ScopeStatus
+from ai_lab.core.enums import AssumptionKind, ProblemKind, ScopeStatus
 from ai_lab.core.investigation import (
     ClarificationQuestion,
     ClarificationRecord,
@@ -18,6 +18,11 @@ from ai_lab.core.investigation import (
 )
 from ai_lab.core.models import HitlRequest
 from ai_lab.observability.logger import get_logger
+from ai_lab.orchestrator.scope_resolver import (
+    finalize_scope_frame,
+    pipeline_hint_for_kind,
+    try_kind_template_scope,
+)
 
 logger = get_logger(__name__)
 
@@ -198,6 +203,13 @@ def resolve_scope(
     if clarifications:
         scope = finalize_after_clarification(scope)
 
+    # ScopeResolver frame: problem_kind + Known/Required/Optional (HITL only for Required).
+    scope = finalize_scope_frame(scope)
+    if scope.pipeline_hint is None and scope.problem_kind is not None:
+        hint = pipeline_hint_for_kind(scope.problem_kind)
+        if hint is not None:
+            scope = scope.model_copy(update={"pipeline_hint": hint})
+
     if (
         scope.status == ScopeStatus.SCOPE_NEEDS_CLARIFICATION
         and round_n >= max_clarification_rounds
@@ -245,6 +257,11 @@ def _heuristics(
     round_n: int,
 ) -> InvestigationScope:
     lower = blended.lower()
+
+    # PR-04 kind templates (closed rod stress, open-ended “stronger”) before legacy ones.
+    kind_hit = try_kind_template_scope(original, blended, clarifications, round_n)
+    if kind_hit is not None:
+        return kind_hit
 
     if _is_heater(lower):
         return _heater_scope(original, blended, clarifications, round_n)
@@ -304,6 +321,8 @@ def _heater_scope(
         )
 
     blocking = [u for u in unknown if u in {"t_initial", "t_final", "duration", "volume"}]
+    optional = [] if losses else ["losses"]
+    assumption_texts = [a.text for a in assumptions]
     if blocking:
         return InvestigationScope(
             original_problem=original,
@@ -314,8 +333,12 @@ def _heater_scope(
             key_terms=["heater", "water", "power", "heat capacity"],
             known_parameters=known,
             unknown_parameters=blocking,
+            required_fields=list(blocking),
+            optional_fields=optional,
+            assumption_candidates=assumption_texts,
             assumptions=assumptions,
             ambiguity=blocking,
+            problem_kind=ProblemKind.CLOSED_NUMERIC,
             pipeline_hint="calculation",
             status=ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
             clarification_round=round_n,
@@ -347,7 +370,11 @@ def _heater_scope(
         key_terms=["heater", "water", "power", "heat capacity"],
         known_parameters=known,
         unknown_parameters=[],
+        required_fields=[],
+        optional_fields=optional,
+        assumption_candidates=assumption_texts,
         assumptions=assumptions,
+        problem_kind=ProblemKind.CLOSED_NUMERIC,
         success_criteria=["Power in watts from Q=mcΔT and P=Q/t with explicit losses"],
         pipeline_hint="calculation",
         status=ScopeStatus.SCOPE_RESOLVED,
@@ -371,6 +398,10 @@ def _ambiguous_strength_scope(
         key_terms=["strength", "material"],
         ambiguity=["strength metric"],
         unknown_parameters=["strength_metric"],
+        required_fields=["strength_metric"],
+        optional_fields=["temperature", "specimen_geometry"],
+        assumption_candidates=[],
+        problem_kind=ProblemKind.OPEN_ENDED,
         pipeline_hint="research",
         status=ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
         clarification_round=round_n,
@@ -427,6 +458,11 @@ def _research_scope(
             ],
             evidence_requirements=reqs,
             required_outputs=[],
+            required_fields=[],
+            optional_fields=["production_route", "host_organism"],
+            assumption_candidates=[
+                "No single commercial process is assumed; compare platforms",
+            ],
             success_criteria=[
                 "Cover manufacturing, spinning, properties, scale-up, and bottlenecks"
             ],
@@ -434,6 +470,7 @@ def _research_scope(
                 "detailed business plan",
                 "commercial market forecast",
             ],
+            problem_kind=ProblemKind.RESEARCH_REVIEW,
             pipeline_hint="research",
             status=ScopeStatus.SCOPE_RESOLVED,
             clarification_round=round_n,
@@ -456,6 +493,10 @@ def _research_scope(
         domain="research",
         key_terms=_key_terms(blended),
         evidence_requirements=reqs,
+        required_fields=[],
+        optional_fields=[],
+        assumption_candidates=[],
+        problem_kind=ProblemKind.RESEARCH_REVIEW,
         pipeline_hint="research",
         status=ScopeStatus.SCOPE_RESOLVED,
         clarification_round=round_n,
@@ -474,6 +515,10 @@ def _vague_scope(
         objective="",
         ambiguity=["subject", "required outputs"],
         unknown_parameters=["subject", "success_criteria"],
+        required_fields=["subject", "success_criteria"],
+        optional_fields=[],
+        assumption_candidates=[],
+        problem_kind=ProblemKind.OPEN_ENDED,
         pipeline_hint=None,
         status=ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
         clarification_round=round_n,
@@ -499,10 +544,14 @@ def _default_resolved(
 ) -> InvestigationScope:
     """Long, named problems (benchmarks) that do not match a special template."""
     first = original.strip().split("\n", 1)[0].strip("# ").strip()
+    # Kind заполняется в finalize_scope_frame, если шаблон не сработал.
     return InvestigationScope(
         original_problem=original,
         objective=first or "Formalize and investigate the posed engineering problem",
         key_terms=_key_terms(blended),
+        required_fields=[],
+        optional_fields=[],
+        assumption_candidates=[],
         pipeline_hint="mixed",
         status=ScopeStatus.SCOPE_RESOLVED,
         clarification_round=round_n,
@@ -598,6 +647,33 @@ def finalize_after_clarification(scope: InvestigationScope) -> InvestigationScop
         or "strength" in (scope.objective or "").lower()
         or "проч" in (scope.original_problem or "").lower()
     )
+    # OPEN_ENDED стержень: Required = load_type — после ответа фиксируем objective.
+    if (
+        scope.problem_kind == ProblemKind.OPEN_ENDED
+        and "load_type" in (scope.required_fields or ["load_type"])
+        and choice
+        and re.search(r"axial|bending|combined|осев|изгиб|комбин", choice, re.I)
+    ):
+        load = choice.strip().lower()
+        return scope.model_copy(
+            update={
+                "objective": f"Propose how to strengthen the rod under {load} loading",
+                "known_parameters": {**scope.known_parameters, "load_type": choice.strip()},
+                "unknown_parameters": [
+                    u for u in scope.unknown_parameters if u != "load_type"
+                ],
+                "required_fields": [r for r in scope.required_fields if r != "load_type"],
+                "ambiguity": [a for a in scope.ambiguity if a != "load_type"],
+                "status": ScopeStatus.SCOPE_RESOLVED,
+                "clarification": None,
+                "pipeline_hint": "mixed",
+                "problem_kind": ProblemKind.DESIGN,
+                "rationale": (
+                    f"Load type locked to {choice.strip()}; investigation can proceed "
+                    "as a design/strengthening study."
+                ),
+            }
+        )
     if strengthish and choice:
         objective, outputs, dims = strength_choice_to_outputs(choice)
         return scope.model_copy(
@@ -610,7 +686,9 @@ def finalize_after_clarification(scope: InvestigationScope) -> InvestigationScop
                 "clarification": None,
                 "ambiguity": [],
                 "unknown_parameters": [],
+                "required_fields": [],
                 "pipeline_hint": "research",
+                "problem_kind": ProblemKind.RESEARCH_REVIEW,
                 "rationale": (
                     "The term “strength” was ambiguous. The investigation now "
                     f"focuses on: {objective}."

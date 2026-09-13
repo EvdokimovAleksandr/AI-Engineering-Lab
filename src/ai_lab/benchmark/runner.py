@@ -5,9 +5,10 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from ai_lab.benchmark.models import ExpectedBehavior
+from ai_lab.benchmark.registry import get_benchmark
 from ai_lab.core.models import ProjectSnapshot
 from ai_lab.orchestrator.runtime import run_project
-from ai_lab.benchmark.registry import get_benchmark
 
 
 def _ensure_workspace(repo_root: Path, benchmark_id: str, *, work_root: Path | None) -> Path:
@@ -47,10 +48,25 @@ async def run_benchmark(
     repo_root: Path,
     provider: str | None = "mock",
     config_path: Path | None = None,
-    auto_approve_hitl: bool = True,
+    auto_approve_hitl: bool | None = None,
     work_root: Path | None = None,
+    simulation_fixture: str | None = None,
 ) -> ProjectSnapshot:
-    """Execute benchmark via LabRuntime; persists a normal RunManifest."""
+    """Execute benchmark via LabRuntime; persists a normal RunManifest.
+
+    For NEEDS_CLARIFICATION cases auto_approve_hitl defaults to False so the
+    run stops at HITL instead of inventing answers. Closed numeric PASS path
+    may use expectation.simulation_fixture (e.g. heater_correct) under mock.
+    """
+    spec = get_benchmark(repo_root, benchmark_id)
+    # Clarification benchmarks must not auto-approve — иначе фейковый PASS.
+    if auto_approve_hitl is None:
+        auto_approve_hitl = (
+            spec.expectation.expected_behavior != ExpectedBehavior.NEEDS_CLARIFICATION
+        )
+    fixture = simulation_fixture
+    if fixture is None and provider == "mock":
+        fixture = spec.expectation.simulation_fixture
     projects_dir = _ensure_workspace(repo_root, benchmark_id, work_root=work_root)
     return await run_project(
         benchmark_id,
@@ -59,4 +75,5 @@ async def run_benchmark(
         config_path=config_path,
         auto_approve_hitl=auto_approve_hitl,
         resume=False,
+        simulation_fixture=fixture,
     )

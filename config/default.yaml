@@ -54,6 +54,15 @@ runtime:
   parallel_independent_groups: true
   # V2.8: max user questions per run (existing HITL; not a second questionnaire system).
   max_clarification_rounds: 2
+  # Max TaskGraph revisions after non-PASS adjudication (FAIL/DISPUTED).
+  # INSUFFICIENT_EVIDENCE never re-enters: missing evidence is a gap, not a retry.
+  # >= iteration.no_progress_limit so CONTINUE streaks can reach REPLAN before cap.
+  max_graph_reentries: 3
+  # PR-06 IterationController: stop/replan when coverage/missing outputs stagnate.
+  iteration:
+    no_progress_limit: 3
+    # After REPLAN still no progress → ASK_USER instead of STOP_INSUFFICIENT_EVIDENCE.
+    hitl_on_no_progress: false
   budget:
     max_iterations: 24
     max_agent_calls: 100

@@ -86,6 +86,8 @@ class JsonKnowledgeRepository:
         self.store.write_json(self._global_index_rel(), index)
 
     def save_claim(self, claim: Claim) -> Claim:
+        from ai_lab.core.execution_context import ContextMismatchError
+
         if claim.kind == EvidenceKind.FACT and not claim.source and not claim.evidence:
             raise ValueError("Refusing to store FACT without source/evidence")
         if not claim.run_id:
@@ -93,8 +95,22 @@ class JsonKnowledgeRepository:
         if not claim.project_id:
             claim.project_id = self.project_id
         if claim.project_id != self.project_id:
-            raise ValueError(
-                f"Cross-project claim write forbidden: {claim.project_id} != {self.project_id}"
+            raise ContextMismatchError(
+                "Cross-project claim write forbidden",
+                field="project_id",
+                expected=self.project_id,
+                actual=claim.project_id,
+                where="JsonKnowledgeRepository.save_claim",
+            )
+        if not claim.investigation_id:
+            claim.investigation_id = claim.project_id
+        elif claim.investigation_id != self.project_id:
+            raise ContextMismatchError(
+                "Cross-investigation claim write forbidden",
+                field="investigation_id",
+                expected=self.project_id,
+                actual=claim.investigation_id,
+                where="JsonKnowledgeRepository.save_claim",
             )
         if not claim.content_hash:
             claim.content_hash = claim_content_hash(

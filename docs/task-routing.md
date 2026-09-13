@@ -108,6 +108,7 @@ Classifier proposal  →  TaskRoutingPolicy.apply()  →  RoutingDecision
 ### Simple heater
 
 complexity≈1, risk≈0, uncertainty≈0 → policy `all_axes_low` → **SIMPLE**.
+`ProblemKind.CLOSED_NUMERIC` (ScopeResolver) усиливает calculation hint; policy не понижает уже поднятый профиль.
 
 ### Shaft design
 
@@ -116,6 +117,11 @@ engineering design signals → **STANDARD**; SIMPLE запрещён evaluation'
 ### Spider silk review
 
 research / competing approaches → **RESEARCH**.
+`ProblemKind.RESEARCH_REVIEW` raise-only поднимает workflow до RESEARCH, если классификатор недооценил.
+
+### Open-ended «how to make the rod stronger?»
+
+`ProblemKind.OPEN_ENDED` → contract `NEEDS_CLARIFICATION`; HITL только для Required (`load type: axial / bending / combined?`). Полный RESEARCH/DESIGN pipeline не стартует, пока Required не заполнены.
 
 ### High-risk «простая» задача
 
@@ -132,4 +138,5 @@ RunManifest.task_routing_decision
 ## Код
 
 - `src/ai_lab/task_routing/` — models, policy, classifier, profiles, router
+- `src/ai_lab/orchestrator/scope_resolver.py` — problem kind + Required frame
 - Интеграция: `LabRuntime._route_task` → `create_planner(..., pipeline_override=...)`

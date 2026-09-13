@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ai_lab.core.enums import AssumptionKind, ResearchOutcome, ScopeStatus
+from ai_lab.core.enums import AssumptionKind, ProblemKind, ResearchOutcome, ScopeStatus
 
 
 def _utc_now() -> datetime:
@@ -88,6 +88,11 @@ class InvestigationScope(BaseModel):
     out_of_scope: list[str] = Field(default_factory=list)
     known_parameters: dict[str, str] = Field(default_factory=dict)
     unknown_parameters: list[str] = Field(default_factory=list)
+    # PR-04 ScopeResolver frame — ask HITL only for Required that block READY.
+    required_fields: list[str] = Field(default_factory=list)
+    optional_fields: list[str] = Field(default_factory=list)
+    assumption_candidates: list[str] = Field(default_factory=list)
+    problem_kind: ProblemKind | None = None
     status: ScopeStatus = ScopeStatus.SCOPE_UNRESOLVED
     locked: bool = False
     # High-level rationale for the UI — not a hidden chain-of-thought transcript.

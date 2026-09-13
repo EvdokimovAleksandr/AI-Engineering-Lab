@@ -75,6 +75,17 @@ Scope clarification is not a second questionnaire system: at most `runtime.max_c
 
 Evidence gaps are rendered separately from Assumptions. Empty research shows recovery attempts; provider errors are labeled as provider failure, not “no sources exist”.
 
+## Iteration stop outcomes (PR-06)
+
+When `IterationController` stops for no evidence progress, the run surfaces the same
+honest engineering axis as other gates:
+
+- `engineering_outcome=INSUFFICIENT_EVIDENCE` (not PASS, not a silent COMPLETED)
+- optional `stop_reason` / `reviews/iteration_progress.json` (coverage before→after, `NO_PROGRESS`, `failure_class`)
+- `STOP_BUDGET` still maps to lifecycle `BUDGET_EXCEEDED` only when the budget was actually hit
+
+UI continues to prefer `engineering_outcome` over synthesis prose.
+
 ## Provenance
 
 UI runs use the same `RunManifest`, TaskGraph, routing snapshot, sandbox snapshot, Evidence Graph, and grounded synthesis as CLI runs.

@@ -6,11 +6,12 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ai_lab.core.enums import (
     ConflictStatus,
     EvidenceStrength,
+    EvidenceType,
     ResearchOutcome,
     SourceKind,
     SourceTrustTier,
@@ -154,7 +155,10 @@ class SourceRecord(BaseModel):
 
 
 class EvidenceRecord(BaseModel):
-    """Excerpt extracted from a Source — provenance is mandatory."""
+    """Excerpt extracted from a Source — provenance is mandatory.
+
+    PR-05: evidence_type classifies provenance (LITERATURE default for research excerpts).
+    """
 
     evidence_id: str
     source_id: str
@@ -163,6 +167,29 @@ class EvidenceRecord(BaseModel):
     retrieved_at: datetime = Field(default_factory=_utc_now)
     content_hash: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # PR-05 lineage type — research excerpts are LITERATURE unless stamped otherwise.
+    evidence_type: EvidenceType = EvidenceType.LITERATURE
+    # Optional binding for LineageVerifier (same investigation/run as claim).
+    project_id: str | None = None
+    investigation_id: str | None = None
+    run_id: str | None = None
+    task_id: str | None = None
+    contract_version: str | None = None
+    # CALCULATED / SIMULATED must point at a computation artifact.
+    computation_artifact_id: str | None = None
+
+    @model_validator(mode="after")
+    def _evidence_type_refs(self) -> EvidenceRecord:
+        # Fail loud: CALCULATED/SIMULATED без computation; LITERATURE без source.
+        if self.evidence_type in {EvidenceType.CALCULATED, EvidenceType.SIMULATED}:
+            if not (self.computation_artifact_id or "").strip():
+                raise ValueError(
+                    f"{self.evidence_type.value} evidence requires computation_artifact_id"
+                )
+        if self.evidence_type == EvidenceType.LITERATURE:
+            if not (self.source_id or "").strip():
+                raise ValueError("LITERATURE evidence requires source_id")
+        return self
 
 
 class SearchHit(BaseModel):
@@ -198,6 +225,12 @@ class ResearchResult(BaseModel):
     parent_query: str | None = None
     strategy: str | None = None
     reason: str | None = None
+    # PR-01: bind research output to the task/investigation that requested it.
+    project_id: str | None = None
+    investigation_id: str | None = None
+    task_id: str | None = None
+    run_id: str | None = None
+    contract_version: str | None = None
 
     def provenance_rows(self) -> list[dict[str, Any]]:
         """Flatten Claim-ready provenance: evidence → source → uri/hash/query."""

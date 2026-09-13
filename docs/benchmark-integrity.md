@@ -88,7 +88,10 @@ V2.8: engineering PASS also requires locked `SCOPE_RESOLVED`/`SCOPE_ASSUMED` and
 Связывает `TaskSpec` (calculation) с `ComputationArtifact`:
 
 - `objective`, `required_inputs`, `required_outputs`
-- `expected_dimensions` (например `power → W`) — **Pint dimensions**, не string equality
+- `expected_dimensions` — **semantic Dimension / unit token**, не string equality:
+  - предпочтительно `length` / `area` / `pressure` / `power` (`Dimension` enum) или реальные единицы (`m`, `m**2`, `Pa`, `W`);
+  - legacy SI-буквы Chief (`L`, `L**2`, `M`, `T`) явно мапятся на LENGTH/AREA/MASS/TIME **до** Pint;
+  - Pint `L` = litre (volume): на стороне *actual* `declared_outputs` буква `L` остаётся литром
 - `expected_relations` (advisory / untrusted)
 - `verification_required`, `minimum_checks`
 - `trusted_fields` — поля, которые LLM не может ослабить через `VerificationPolicy`
@@ -106,8 +109,9 @@ Stdout сам по себе **не** engineering result — нужны `declared
 `validate_computation_against_spec(computation, calculation_spec)`:
 
 - missing required outputs → invalid
-- dimension mismatch via Pint (`power/W` vs `memory_gib/GiB`; `W`≡`kW`≡`J/s`; `J`≠`W`) → invalid
-- unparseable unit tags (`length`, formula strings) → invalid
+- dimension mismatch (`power/W` vs `memory_gib/GiB`; `W`≡`kW`≡`J/s`; `J`≠`W`;
+  `length`/`L`≡`m`; `L**2`/`area`≡`m**2`; `length`≢`liter`) → invalid
+- junk formula strings as units → invalid; Dimension names (`length`) are valid
 - empty `declared_outputs` → invalid (даже если stdout красивый)
 - orphan artifacts (wrong / missing `calculation_spec_id`) do not satisfy the spec
 
@@ -125,6 +129,10 @@ Stdout сам по себе **не** engineering result — нужны `declared
 - **required_output_coverage** — каждый locked output имеет verified claim, связанный с
   computation, который объявляет этот output (`covers_outputs` / statement)
 - **acceptance_passed** — generic benchmark acceptance (если контракт задан)
+- **lineage_ok / contract_coverage_ok** (PR-05) — claim/evidence/computation разделяют
+  investigation/run/contract; required outputs контракта имеют claim+evidence lineage.
+  `coverage_ratio` / `covered_outputs` / `missing_outputs` питают IterationController (PR-06).
+  Fail → `INSUFFICIENT_EVIDENCE`, не silent PASS.
 
 Пустой `DeterministicCheckReport` **никогда** не даёт PASS при `verification_required`.
 
@@ -161,6 +169,8 @@ Accidental numeric match with wrong inputs fails the input oracle.
 - quantitative `accepted_claims` / `verified_results` только из claims с passed deterministic check
 - LLM narrative (`summary`) не может создать accepted quantitative claim
 - synthesis cannot upgrade `INSUFFICIENT_EVIDENCE` → `PASS`
+- PR-05: `UNVERIFIED` / `REJECTED` / `CONTRADICTED` никогда не accepted; `PROPOSED` без
+  evidence lineage + verified computation — тоже нет
 - Understanding lock snapshot is run-scoped; synthesis writes `chief_synthesis_notes.json`
 
 ## Semantic drift examples (must NOT engineering PASS)
@@ -209,6 +219,24 @@ LLM не повышает trust level и не может удалить required
 | `policy_lock_attack` | NOT PASS |
 | `accidental_numeric_match` | NOT PASS |
 
+## PR-07 behavioral coverage
+
+Benchmarks / scenarios now also judge **refusal and stop behavior**, not only
+numeric PASS:
+
+| Case | Expected behavior | Notes |
+|------|-------------------|-------|
+| `simple_heater` | PASS | closed calc; default mock fixture `heater_correct` |
+| `ambiguous_rod_strength` / scenario `ambiguous_engineering` | NEEDS_CLARIFICATION | Required `load_type` |
+| scenario `context_isolation` | FAIL + FailureClass.CONTEXT | sofa+rod contamination |
+| scenario `units` | PASS (oracle) | length≡m; length≢litre |
+| scenario `budget_control` | INSUFFICIENT_EVIDENCE | IterationController stop, no token burn |
+| `spider_silk_review` | ORCHESTRATION_ONLY | STUB/empty research ≠ PASS |
+
+Evaluate reports include `details.execution_mode` (`MOCK` / `LIVE_CURSOR` /
+`REPLAY`) and a `failure_class` category that **reuses** PR-06 `FailureClass`
+(do not fork the enum).
+
 ## Invariants (V2.6.1)
 
 1. Technical completion ≠ engineering success  
@@ -229,7 +257,7 @@ LLM не повышает trust level и не может удалить required
 ## Modules
 
 - `ai_lab.checks.calculation_contract` — spec parse, relevance, completeness, coverage
-- `ai_lab.checks.units` — Pint `units_compatible` / `convert_magnitude`
+- `ai_lab.checks.units` — `Dimension` enum, legacy SI map, Pint `units_compatible` / `convert_magnitude`
 - `ai_lab.benchmark.acceptance` — generic acceptance oracle
 - `ai_lab.orchestrator.adjudication` — completeness-aware gate
 - `ai_lab.orchestrator.synthesis` — grounded accepted claims
@@ -240,4 +268,4 @@ LLM не повышает trust level и не может удалить required
 
 See also: [engineering-verification.md](engineering-verification.md), [benchmarks.md](benchmarks.md),
 [knowledge-architecture.md](knowledge-architecture.md), [taskgraph-planner.md](taskgraph-planner.md).
-
+

@@ -130,6 +130,7 @@ def ingest_research_result(
                 source=source.uri,
                 source_trust=source.trust_tier,
                 evidence=excerpts[0].text if excerpts else None,
+                evidence_ids=list(ev_ids),
                 conditions={
                     "source_id": source.source_id,
                     "evidence_ids": ev_ids,
@@ -153,6 +154,10 @@ def ingest_research_result(
                     else (0.7 if source.trust_tier == SourceTrustTier.PRIMARY else 0.45)
                 ),
                 run_id=run_id,
+                project_id=result.project_id,
+                investigation_id=result.investigation_id or result.project_id,
+                task_id=result.task_id,
+                contract_version=result.contract_version,
             )
             saved = knowledge.save_claim(claim)
             claim_ids.append(saved.claim_id)

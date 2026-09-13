@@ -29,14 +29,43 @@ class EvidenceStore:
     def save_claim(self, claim: Claim, subdirectory: str = "research") -> str:
         """Persist claim into current run namespace. `subdirectory` kept for API compat."""
         _ = subdirectory
+        from ai_lab.core.execution_context import ContextMismatchError
+
         if claim.kind == EvidenceKind.FACT and not claim.source and not claim.evidence:
             raise ValueError("Refusing to store FACT without source/evidence")
         if not claim.run_id:
             if not self.run_id:
                 raise ValueError("EvidenceStore.save_claim requires run_id on claim or store")
             claim.run_id = self.run_id
+        elif self.run_id and claim.run_id != self.run_id:
+            raise ContextMismatchError(
+                "Claim.run_id does not match EvidenceStore.run_id",
+                field="run_id",
+                expected=self.run_id,
+                actual=claim.run_id,
+                where="EvidenceStore.save_claim",
+            )
         if not claim.project_id:
             claim.project_id = self.store.name
+        elif claim.project_id != self.store.name:
+            raise ContextMismatchError(
+                "Claim.project_id does not match project store",
+                field="project_id",
+                expected=self.store.name,
+                actual=claim.project_id,
+                where="EvidenceStore.save_claim",
+            )
+        # investigation_id mirrors project folder until multi-investigation projects exist.
+        if not claim.investigation_id:
+            claim.investigation_id = claim.project_id
+        elif claim.investigation_id != self.store.name:
+            raise ContextMismatchError(
+                "Claim.investigation_id does not match project store",
+                field="investigation_id",
+                expected=self.store.name,
+                actual=claim.investigation_id,
+                where="EvidenceStore.save_claim",
+            )
         saved = self._repo.save_claim(claim)
         # Return run-scoped relative path
         return f".runs/{saved.run_id}/claims/{saved.claim_id}_v{saved.version}.json"

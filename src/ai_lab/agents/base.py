@@ -97,6 +97,8 @@ class AgentContext:
     graph: Any = None  # EvidenceGraph | JsonEvidenceRepository | None
     knowledge: Any = None  # KnowledgeService | None
     budget: Any = None  # RunBudget | None
+    # PR-01: optional until runtime stamps per-task ExecutionContext in _run_task.
+    execution_context: Any = None  # ExecutionContext | None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def model_for(self, role: AgentRole) -> str | None:

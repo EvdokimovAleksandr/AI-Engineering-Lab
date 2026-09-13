@@ -96,6 +96,24 @@ class SimulationAgent(BaseAgent):
         calc_spec = None
         relevance = None
         contract_error: str | None = None
+        from ai_lab.core.execution_context import (
+            ContextMismatchError,
+            ExecutionContext,
+            context_binding_dict,
+            require_artifact_context,
+        )
+
+        exec_ctx = ctx.execution_context
+        if exec_ctx is None:
+            exec_ctx = ExecutionContext.for_project_run(
+                project_id=ctx.store.name,
+                investigation_id=ctx.store.name,
+                task_id=task.task_id,
+                run_id=ctx.run_id,
+            )
+        elif not isinstance(exec_ctx, ExecutionContext):
+            exec_ctx = ExecutionContext.model_validate(exec_ctx)
+
         if is_calculation or payload.get("calculation_spec"):
             raw_spec = (
                 payload.get("calculation_spec")
@@ -107,8 +125,14 @@ class SimulationAgent(BaseAgent):
                     raw_spec,
                     task_id=task.task_id,
                     run_id=ctx.run_id,
+                    project_id=ctx.store.name,
+                    investigation_id=ctx.store.name,
                     policy=policy,
+                    execution_context=exec_ctx,
                 )
+            except ContextMismatchError:
+                # Isolation errors must abort — never soft-fail into a foreign domain.
+                raise
             except ValueError as exc:
                 # Invalid LLM shape must not abort the whole lab run.
                 contract_error = str(exc)
@@ -138,6 +162,10 @@ class SimulationAgent(BaseAgent):
                         )
                     calc_spec = None
 
+        # Hard gate before sandbox: spec must belong to this task/run/investigation.
+        if calc_spec is not None:
+            require_artifact_context(exec_ctx, calc_spec, where="CalculationSpec.pre_execute")
+
         try:
             exec_result = await ctx.tools.call(
                 "python.execute",
@@ -166,7 +194,15 @@ class SimulationAgent(BaseAgent):
             raise RuntimeError("python.execute must return a ComputationArtifact")
         artifact = ComputationArtifact.model_validate(exec_result["artifact"])
         artifact.kind = "calculation" if is_calculation else "simulation"
-        artifact.task_id = task.task_id
+        # Stamp PR-01 lineage / isolation fields (fill unset only; mismatch already gated).
+        binding = context_binding_dict(exec_ctx)
+        artifact.task_id = binding["task_id"]
+        artifact.run_id = binding["run_id"]
+        artifact.project_id = binding["project_id"]
+        artifact.investigation_id = binding["investigation_id"]
+        artifact.contract_version = binding["contract_version"]
+        if artifact.created_at is None:
+            artifact.created_at = artifact.started_at
         artifact.objective = task.objective
         declared = payload.get("declared_outputs") if isinstance(payload.get("declared_outputs"), dict) else {}
         artifact.declared_outputs = declared
@@ -278,6 +314,11 @@ class SimulationAgent(BaseAgent):
                     compute_check=0.8 if kind == EvidenceKind.CALCULATION else 0.1,
                     assumption_quality=0.4,
                 ),
+                project_id=binding["project_id"],
+                investigation_id=binding["investigation_id"],
+                task_id=binding["task_id"],
+                run_id=binding["run_id"],
+                contract_version=binding["contract_version"],
             )
             paths.append(ctx.evidence.save_claim(claim, subdirectory="calculations"))
             claims.append(claim)

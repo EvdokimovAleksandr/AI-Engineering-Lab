@@ -291,9 +291,14 @@ def test_unit_aliases_are_normalized() -> None:
     assert units_compatible("m", "meter")
     assert not units_compatible("W", "J")
     assert not units_compatible("W", "kWh")
-    assert not units_compatible("length", "m")
+    # PR-02: Dimension name length is a contract token, compatible with m.
+    assert units_compatible("length", "m")
     assert not is_parseable_unit("length")
     assert is_parseable_unit("m")
+    # Bare L as expected (legacy SI) matches m; as Pint unit L is litre ≠ m via unit↔unit
+    # when both sides are real units with different dims — length path uses Dimension.
+    assert units_compatible("L", "m")
+    assert not units_compatible("liter", "m")
 
 
 @pytest.mark.asyncio

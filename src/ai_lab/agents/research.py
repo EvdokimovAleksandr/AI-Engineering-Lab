@@ -82,7 +82,29 @@ class ResearchAgent(BaseAgent):
         )
         report = recovered.report
         tool_result = recovered.result
+        # PR-01: stamp / gate research output to this task before claims attach.
+        from ai_lab.core.execution_context import (
+            ExecutionContext,
+            attach_research_result_to_context,
+            context_binding_dict,
+        )
+
+        exec_ctx = ctx.execution_context
+        if exec_ctx is None:
+            exec_ctx = ExecutionContext.for_project_run(
+                project_id=ctx.store.name,
+                investigation_id=ctx.store.name,
+                task_id=task.task_id,
+                run_id=ctx.run_id,
+            )
+        elif not isinstance(exec_ctx, ExecutionContext):
+            exec_ctx = ExecutionContext.model_validate(exec_ctx)
+        if tool_result is not None:
+            tool_result = attach_research_result_to_context(
+                tool_result, exec_ctx, where="ResearchResult.attach"
+            )
         tool_dump = tool_result.model_dump(mode="json") if tool_result is not None else {}
+        binding = context_binding_dict(exec_ctx)
 
         if ctx.run_store is not None:
             ctx.run_store.save_planner_json(
@@ -106,6 +128,7 @@ class ResearchAgent(BaseAgent):
                 "Search was not completed because the research provider failed.",
                 evidence=report.provider_error or "provider error",
                 extra={"research_outcome": report.outcome.value},
+                binding=binding,
             )
             extra_claims.append(claim)
             paths.append(ctx.evidence.save_claim(claim, subdirectory="research"))
@@ -120,6 +143,7 @@ class ResearchAgent(BaseAgent):
                     f"refinements={report.refinement_count}"
                 ),
                 extra={"research_outcome": report.outcome.value, "gaps": report.evidence_gaps},
+                binding=binding,
             )
             extra_claims.append(claim)
             paths.append(ctx.evidence.save_claim(claim, subdirectory="research"))
@@ -180,8 +204,8 @@ class ResearchAgent(BaseAgent):
         )
 
 
-def _gap_claim(statement: str, *, evidence: str, extra: dict) -> Claim:
-    return Claim(
+def _gap_claim(statement: str, *, evidence: str, extra: dict, binding: dict | None = None) -> Claim:
+    claim = Claim(
         statement=statement,
         kind=EvidenceKind.EVIDENCE_GAP,
         evidence=evidence,
@@ -191,6 +215,13 @@ def _gap_claim(statement: str, *, evidence: str, extra: dict) -> Claim:
         confidence=ConfidenceBreakdown(source_quality=0.0, assumption_quality=0.0),
         falsifiers=["Independent retrieval of primary sources covering the locked scope"],
     )
+    if binding:
+        claim.project_id = binding.get("project_id")
+        claim.investigation_id = binding.get("investigation_id")
+        claim.task_id = binding.get("task_id")
+        claim.run_id = binding.get("run_id")
+        claim.contract_version = binding.get("contract_version")
+    return claim
 
 
 def _result_from_tool(payload: dict) -> ResearchResult:
@@ -275,6 +306,10 @@ def _findings_from_payload(
                 source_quality=0.2 if source_trust == SourceTrustTier.STUB else (0.5 if source else 0.2),
                 assumption_quality=0.4,
             ),
+            project_id=ctx.store.name,
+            investigation_id=ctx.store.name,
+            task_id=ctx.extra.get("task_id"),
+            run_id=ctx.run_id,
         )
         rel = ctx.evidence.save_claim(claim, subdirectory="research")
         paths.append(rel)
