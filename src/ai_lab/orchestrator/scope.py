@@ -19,7 +19,9 @@ from ai_lab.core.investigation import (
 from ai_lab.core.models import HitlRequest
 from ai_lab.observability.logger import get_logger
 from ai_lab.orchestrator.scope_resolver import (
+    apply_specialized_second_stage,
     finalize_scope_frame,
+    merge_clarification_answers_into_known,
     pipeline_hint_for_kind,
     try_kind_template_scope,
 )
@@ -143,6 +145,7 @@ def hitl_request_for_scope(scope: InvestigationScope) -> HitlRequest:
             "question": q.question,
             "why": q.why,
             "input_mode": q.input_mode,
+            "field": q.field,
             "scope_id": scope.scope_id,
             "round": scope.clarification_round,
             "original_problem": scope.original_problem,
@@ -158,11 +161,17 @@ def apply_clarification(
     answers: dict[str, str] | None = None,
 ) -> InvestigationScope:
     """Record the user answer without mutating original_problem."""
+    # Привязываем ответ к Required-field текущего вопроса — иначе resume теряет смысл.
+    field = scope.clarification.field if scope.clarification is not None else None
+    merged_answers = dict(answers or {})
+    if field and (choice or note) and field not in merged_answers:
+        merged_answers[field] = (choice or note or "").strip()
     record = ClarificationRecord(
         round=scope.clarification_round + 1,
         choice=choice,
         note=note or "",
-        answers=dict(answers or {}),
+        answers=merged_answers,
+        field=field,
     )
     return scope.model_copy(
         update={
@@ -426,6 +435,7 @@ def _ambiguous_strength_scope(
                 "Все перечисленное",
             ],
             input_mode="choice",
+            field="strength_metric",
         ),
     )
 
@@ -642,39 +652,83 @@ def finalize_after_clarification(scope: InvestigationScope) -> InvestigationScop
         return scope
     last = scope.clarifications[-1]
     choice = last.choice or last.note
+    known = merge_clarification_answers_into_known(scope)
+
+    # OPEN_ENDED «прочнее» + load_type уже в known (этот или прошлый HITL):
+    # шаблон снова отдаёт OPEN_ENDED — продвигаем в DESIGN и гоняем второй этап.
+    # Нельзя RESOLVED / пустой required только из-за axial.
+    if (
+        scope.problem_kind == ProblemKind.OPEN_ENDED
+        and _field_in_known(known, "load_type")
+        and (
+            "load_type" in (scope.required_fields or [])
+            or "load_type" in (scope.unknown_parameters or [])
+            or last.field
+            in {"load_type", "strength_metric", "geometry", "design_constraint"}
+        )
+    ):
+        load_val = str(known.get("load_type") or "").strip()
+        promoted = scope.model_copy(
+            update={
+                "objective": (
+                    f"Propose how to strengthen the rod under {load_val} loading"
+                ),
+                "known_parameters": known,
+                "unknown_parameters": [
+                    u for u in scope.unknown_parameters if u != "load_type"
+                ],
+                # load_type снят; второй этап заново вычислит DESIGN Required.
+                "required_fields": [
+                    r for r in scope.required_fields if r != "load_type"
+                ],
+                "ambiguity": [a for a in scope.ambiguity if a != "load_type"],
+                "clarification": None,
+                "pipeline_hint": "mixed",
+                "problem_kind": ProblemKind.DESIGN,
+                "rationale": (
+                    f"Load type locked to {load_val}; promoting OPEN_ENDED → DESIGN. "
+                    "Second-stage Required must still be satisfied before READY."
+                ),
+                "status": ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
+                "locked": False,
+            }
+        )
+        return apply_specialized_second_stage(promoted)
+
+    # Уже DESIGN (или другой specialized): вливаем known и пересчитываем Required.
+    if scope.problem_kind in {
+        ProblemKind.DESIGN,
+        ProblemKind.RESEARCH_REVIEW,
+        ProblemKind.EXPERIMENTAL,
+        ProblemKind.PARAMETRIC,
+    }:
+        updated = scope.model_copy(
+            update={
+                "known_parameters": known,
+                "locked": False,
+            }
+        )
+        return apply_specialized_second_stage(updated)
+
     strengthish = (
         scope.domain == "materials"
         or "strength" in (scope.objective or "").lower()
         or "проч" in (scope.original_problem or "").lower()
     )
-    # OPEN_ENDED стержень: Required = load_type — после ответа фиксируем objective.
-    if (
-        scope.problem_kind == ProblemKind.OPEN_ENDED
-        and "load_type" in (scope.required_fields or ["load_type"])
-        and choice
-        and re.search(r"axial|bending|combined|осев|изгиб|комбин", choice, re.I)
-    ):
-        load = choice.strip().lower()
-        return scope.model_copy(
-            update={
-                "objective": f"Propose how to strengthen the rod under {load} loading",
-                "known_parameters": {**scope.known_parameters, "load_type": choice.strip()},
-                "unknown_parameters": [
-                    u for u in scope.unknown_parameters if u != "load_type"
-                ],
-                "required_fields": [r for r in scope.required_fields if r != "load_type"],
-                "ambiguity": [a for a in scope.ambiguity if a != "load_type"],
-                "status": ScopeStatus.SCOPE_RESOLVED,
-                "clarification": None,
-                "pipeline_hint": "mixed",
-                "problem_kind": ProblemKind.DESIGN,
-                "rationale": (
-                    f"Load type locked to {choice.strip()}; investigation can proceed "
-                    "as a design/strengthening study."
-                ),
-            }
-        )
-    if strengthish and choice:
+    # Материалы «насколько прочен» → RESEARCH_REVIEW mapping.
+    # Не перехватывать DESIGN-only fields (geometry / design_constraint / load_type).
+    if strengthish and choice and scope.problem_kind != ProblemKind.DESIGN:
+        if last.field in {"geometry", "design_constraint", "load_type"}:
+            return apply_specialized_second_stage(
+                scope.model_copy(
+                    update={
+                        "known_parameters": known,
+                        "problem_kind": ProblemKind.DESIGN,
+                        "pipeline_hint": "mixed",
+                        "status": ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
+                    }
+                )
+            )
         objective, outputs, dims = strength_choice_to_outputs(choice)
         return scope.model_copy(
             update={
@@ -682,6 +736,7 @@ def finalize_after_clarification(scope: InvestigationScope) -> InvestigationScop
                 "required_outputs": outputs,
                 "expected_dimensions": dims,
                 "domain": "materials",
+                "known_parameters": known,
                 "status": ScopeStatus.SCOPE_RESOLVED,
                 "clarification": None,
                 "ambiguity": [],
@@ -696,3 +751,7 @@ def finalize_after_clarification(scope: InvestigationScope) -> InvestigationScop
             }
         )
     return scope
+
+
+def _field_in_known(known: dict[str, str], name: str) -> bool:
+    return name in known and bool(str(known.get(name) or "").strip())

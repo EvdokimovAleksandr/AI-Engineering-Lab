@@ -18,6 +18,21 @@ from ai_lab.core.investigation import (
     TypedAssumption,
 )
 
+# После первого pass, если kind стал специализированным — второй этап Required.
+SPECIALIZED_SECOND_STAGE_KINDS: frozenset[ProblemKind] = frozenset(
+    {
+        ProblemKind.DESIGN,
+        ProblemKind.RESEARCH_REVIEW,
+        ProblemKind.EXPERIMENTAL,
+        ProblemKind.PARAMETRIC,
+    }
+)
+
+_LOAD_TYPE_ANSWER = re.compile(
+    r"axial|bending|combined|осев|изгиб|комбин",
+    re.IGNORECASE,
+)
+
 # Closed rod stress-ratio: diameter + force + scale + ratio/stress asks.
 _CLOSED_ROD_STRESS = re.compile(
     r"(?:rod|стерж\w*|вал\w*).{0,80}?"
@@ -230,7 +245,270 @@ def _open_rod_stronger_scope(
             ),
             options=["axial", "bending", "combined"],
             input_mode="choice",
+            field="load_type",
         ),
+    )
+
+
+def _field_filled(known: dict[str, str], name: str) -> bool:
+    return name in known and bool(str(known.get(name) or "").strip())
+
+
+def merge_clarification_answers_into_known(
+    scope: InvestigationScope,
+) -> dict[str, str]:
+    """Собрать known из known_parameters + ответов HITL (field / answers / load_type)."""
+    known = dict(scope.known_parameters or {})
+    for rec in scope.clarifications or []:
+        for key, val in (rec.answers or {}).items():
+            if val is not None and str(val).strip():
+                known[key] = str(val).strip()
+        choice = (rec.choice or rec.note or "").strip()
+        if not choice:
+            continue
+        if rec.field:
+            known.setdefault(rec.field, choice)
+        elif _LOAD_TYPE_ANSWER.search(choice):
+            # Legacy records без field= — тип нагрузки узнаём по тексту ответа.
+            known.setdefault("load_type", choice)
+    return known
+
+
+def _is_open_strengthen_problem(scope: InvestigationScope) -> bool:
+    """Класс open-ended «сделать прочнее» — не benchmark-id, а эвристика постановки."""
+    blob = f"{scope.original_problem or ''}\n{scope.objective or ''}"
+    return bool(_OPEN_ROD_STRONGER.search(blob))
+
+
+def _diameter_is_design_output(text: str) -> bool:
+    """Диаметр — искомый выход (shaft design), а не baseline Required."""
+    return bool(
+        re.search(
+            r"(определить|find|compute|вычисл|минимальн\w*\s+диаметр|"
+            r"preliminary\s+diameter|select\s+a?\s*diameter|подбер\w*\s+диаметр)",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def compute_specialized_required(scope: InvestigationScope) -> list[str]:
+    """Второй этап: Required для DESIGN / RESEARCH / EXPERIMENTAL / PARAMETRIC.
+
+    Unknown, не входящие в optional, не превращаются в optional молча —
+    они блокируют READY, пока не заполнены или не приняты как assumption HITL.
+    """
+    kind = scope.problem_kind
+    if kind not in SPECIALIZED_SECOND_STAGE_KINDS:
+        return list(scope.required_fields or [])
+
+    known = dict(scope.known_parameters or {})
+    optional = set(scope.optional_fields or [])
+    required: list[str] = []
+
+    def _add(name: str) -> None:
+        if name not in required and not _field_filled(known, name):
+            required.append(name)
+
+    if kind == ProblemKind.DESIGN:
+        if _is_open_strengthen_problem(scope):
+            _add("load_type")
+            _add("strength_metric")
+            blob = f"{scope.original_problem or ''}\n{scope.objective or ''}"
+            if not _diameter_is_design_output(blob):
+                _add("geometry")
+            _add("design_constraint")
+        # Ранее объявленные unknown (не optional) остаются блокирующими.
+        for name in scope.unknown_parameters or []:
+            if name in optional:
+                continue
+            _add(name)
+        for name in scope.required_fields or []:
+            _add(name)
+    elif kind == ProblemKind.RESEARCH_REVIEW:
+        if not (scope.objective or "").strip():
+            _add("subject")
+        for name in scope.required_fields or []:
+            _add(name)
+    elif kind == ProblemKind.EXPERIMENTAL:
+        if not (scope.objective or "").strip():
+            _add("protocol_objective")
+        for name in scope.required_fields or []:
+            _add(name)
+    elif kind == ProblemKind.PARAMETRIC:
+        for name in scope.required_fields or []:
+            _add(name)
+        for name in scope.unknown_parameters or []:
+            if name not in optional:
+                _add(name)
+
+    return required
+
+
+def clarification_for_required_field(field: str) -> ClarificationQuestion:
+    """HITL-вопрос для конкретного Required второго этапа (fail loud на неизвестном)."""
+    if field == "load_type":
+        return ClarificationQuestion(
+            question="load type: axial / bending / combined?",
+            why=(
+                "Без типа нагрузки нельзя выбрать расчётную модель и критерий "
+                "«прочнее» — это разные Required для READY."
+            ),
+            options=["axial", "bending", "combined"],
+            input_mode="choice",
+            field="load_type",
+        )
+    if field == "strength_metric":
+        return ClarificationQuestion(
+            question=(
+                "What should «stronger» mean: higher yield, higher UTS, "
+                "higher stiffness, or higher fatigue life?"
+            ),
+            why=(
+                "Критерий «прочнее» задаёт success metric DESIGN; без него "
+                "нельзя честно закрыть контракт."
+            ),
+            options=["yield_strength", "uts", "stiffness", "fatigue_life"],
+            input_mode="choice",
+            field="strength_metric",
+        )
+    if field == "geometry":
+        return ClarificationQuestion(
+            question=(
+                "What is the current rod geometry (diameter / cross-section) "
+                "used as the design baseline?"
+            ),
+            why=(
+                "Без базовой геометрии нельзя предложить усиление относительно "
+                "исходного стержня — только общие лозунги."
+            ),
+            options=[],
+            input_mode="text",
+            field="geometry",
+        )
+    if field == "design_constraint":
+        return ClarificationQuestion(
+            question=(
+                "Which hard design constraint applies: mass, cost, envelope/size, "
+                "or explicitly none?"
+            ),
+            why=(
+                "DESIGN trade-off без ограничения (или явного «без ограничения») "
+                "не определён — нельзя считать задачу READY."
+            ),
+            options=["mass_limit", "cost_limit", "envelope_limit", "no_hard_constraint"],
+            input_mode="choice",
+            field="design_constraint",
+        )
+    if field == "subject":
+        return ClarificationQuestion(
+            question="What subject should the research review cover?",
+            why="RESEARCH_REVIEW без предмета не может стать READY.",
+            options=[],
+            input_mode="text",
+            field="subject",
+        )
+    if field == "protocol_objective":
+        return ClarificationQuestion(
+            question="What experimental protocol objective must be achieved?",
+            why="EXPERIMENTAL без цели протокола не может стать READY.",
+            options=[],
+            input_mode="text",
+            field="protocol_objective",
+        )
+    # Не маскируем неизвестный field «общим clarify» — падаем явно.
+    raise ValueError(
+        f"No clarification template for required field {field!r}; "
+        "extend clarification_for_required_field"
+    )
+
+
+def apply_specialized_second_stage(scope: InvestigationScope) -> InvestigationScope:
+    """Второй этап валидации контракта после выбора специализированного problem_kind.
+
+    READY только если все blocking Required заполнены. Оставшиеся unknown
+    не переводятся в optional молча.
+    """
+    if scope.problem_kind not in SPECIALIZED_SECOND_STAGE_KINDS:
+        return scope
+
+    known = merge_clarification_answers_into_known(scope)
+    working = scope.model_copy(update={"known_parameters": known})
+    required = compute_specialized_required(working)
+    unmet = [r for r in required if not _field_filled(known, r)]
+    optional = [
+        o
+        for o in (scope.optional_fields or [])
+        if o not in required
+    ]
+    # Unknown = unmet Required + прочие неизвестные, не ставшие known/optional.
+    unknown: list[str] = list(unmet)
+    for u in scope.unknown_parameters or []:
+        if _field_filled(known, u):
+            continue
+        if u in optional or u in unknown:
+            continue
+        # Не optional и не заполнен → остаётся блокирующим unknown/required.
+        if u not in required:
+            unknown.append(u)
+
+    if unmet:
+        next_field = unmet[0]
+        ambiguity = list(unmet)
+        for a in scope.ambiguity or []:
+            if a not in ambiguity:
+                ambiguity.append(a)
+        return scope.model_copy(
+            update={
+                "known_parameters": known,
+                "required_fields": unmet,
+                "unknown_parameters": unknown,
+                "optional_fields": optional,
+                "status": ScopeStatus.SCOPE_NEEDS_CLARIFICATION,
+                "clarification": clarification_for_required_field(next_field),
+                "ambiguity": ambiguity,
+                "locked": False,
+                "pipeline_hint": scope.pipeline_hint
+                or pipeline_hint_for_kind(scope.problem_kind),
+                "rationale": (
+                    (scope.rationale or "").rstrip()
+                    + (
+                        f" Second-stage {scope.problem_kind.value} Required still "
+                        f"blocking READY: {unmet}."
+                    )
+                ).strip(),
+            }
+        )
+
+    # Уже RESOLVED/ASSUMED без unmet и без новых known — не переписываем артефакт.
+    if (
+        scope.status in {ScopeStatus.SCOPE_RESOLVED, ScopeStatus.SCOPE_ASSUMED}
+        and known == dict(scope.known_parameters or {})
+        and not (scope.required_fields or [])
+    ):
+        return scope
+
+    return scope.model_copy(
+        update={
+            "known_parameters": known,
+            "required_fields": [],
+            "unknown_parameters": [u for u in unknown if not _field_filled(known, u)],
+            "optional_fields": optional,
+            "status": ScopeStatus.SCOPE_RESOLVED,
+            "clarification": None,
+            "ambiguity": [
+                a for a in (scope.ambiguity or []) if not _field_filled(known, a)
+            ],
+            "pipeline_hint": scope.pipeline_hint
+            or pipeline_hint_for_kind(scope.problem_kind),
+            "rationale": (
+                (scope.rationale or "").rstrip()
+                + (
+                    f" Second-stage {scope.problem_kind.value} Required frame "
+                    "satisfied; investigation may lock."
+                )
+            ).strip(),
+        }
     )
 
 
@@ -249,7 +527,8 @@ def finalize_scope_frame(scope: InvestigationScope) -> InvestigationScope:
         required = list(scope.unknown_parameters or scope.ambiguity or [])
         updates["required_fields"] = required
 
-    if scope.problem_kind == ProblemKind.OPEN_ENDED or (
+    kind = updates.get("problem_kind", scope.problem_kind)
+    if kind == ProblemKind.OPEN_ENDED or (
         updates.get("problem_kind") == ProblemKind.OPEN_ENDED
     ):
         # OPEN_ENDED без заполненных Required не может быть READY.
@@ -261,9 +540,14 @@ def finalize_scope_frame(scope: InvestigationScope) -> InvestigationScope:
     if not scope.assumption_candidates and scope.assumptions:
         updates["assumption_candidates"] = [a.text for a in scope.assumptions]
 
-    if not updates:
-        return scope
-    return scope.model_copy(update=updates)
+    if updates:
+        scope = scope.model_copy(update=updates)
+
+    # Второй этап: специализированный kind → пересчёт Required (не silent READY).
+    if scope.problem_kind in SPECIALIZED_SECOND_STAGE_KINDS:
+        scope = apply_specialized_second_stage(scope)
+
+    return scope
 
 
 def pipeline_hint_for_kind(kind: ProblemKind | None) -> str | None:

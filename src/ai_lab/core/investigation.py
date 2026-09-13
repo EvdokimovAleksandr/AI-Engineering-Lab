@@ -51,6 +51,8 @@ class ClarificationQuestion(BaseModel):
     options: list[str] = Field(default_factory=list)
     # "choice" uses options; "text" expects a free-form note (e.g. missing temperatures).
     input_mode: str = "choice"
+    # Какой Required-field закрывает этот вопрос (для multi-step scope / resume).
+    field: str | None = None
 
 
 class ClarificationRecord(BaseModel):
@@ -60,6 +62,8 @@ class ClarificationRecord(BaseModel):
     choice: str | None = None
     note: str = ""
     answers: dict[str, str] = Field(default_factory=dict)
+    # Required-field, на который дан ответ (копируется из ClarificationQuestion.field).
+    field: str | None = None
     applied_at: datetime = Field(default_factory=_utc_now)
 
 
